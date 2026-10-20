@@ -8,9 +8,21 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import classification_report, confusion_matrix, roc_auc_score
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.naive_bayes import GaussianNB
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.metrics import (
+    classification_report,
+    confusion_matrix,
+    roc_auc_score,
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_curve
+)
 
 
 #=======================
@@ -400,27 +412,43 @@ for df, df_name, cols in outlier_targets:
 
 
 #=======================
-#       Missing-Value Handling & Imputation
+#       Train-Validation Customer Partition (Prevent Leakage)
+#=======================
+
+# Establish train/val split strictly at customer level before calculating any imputations or outlier caps
+train_cust_ids, val_cust_ids = train_test_split(
+    train_data["customer_id"],
+    test_size=0.20,
+    random_state=42,
+    stratify=train_data["target"]
+)
+train_cust_set = set(train_cust_ids)
+print(f"\nLeakage Prevention: Partitioned {len(train_cust_ids)} training customers and {len(val_cust_ids)} validation customers.")
+
+
+#=======================
+#       Missing-Value Handling & Imputation (Train Set Only)
 #=======================
 
 print("\n" + "=" * 50)
-print("Missing-Value Imputation")
+print("Missing-Value Imputation (Fit Strictly on Train Data)")
 print("=" * 50)
 
-# Impute email_open_rate with median
-median_email = customers["email_open_rate"].median()
+# Impute email_open_rate with median derived strictly from training customers
+median_email = customers.loc[customers["customer_id"].isin(train_cust_set), "email_open_rate"].median()
 customers["email_open_rate"] = customers["email_open_rate"].fillna(median_email)
 
-# Impute age with median
-median_age = customers["age"].median()
+# Impute age with median derived strictly from training customers
+median_age = customers.loc[customers["customer_id"].isin(train_cust_set), "age"].median()
 customers["age"] = customers["age"].fillna(median_age)
 
-# Impute credit_limit with median
-median_credit = customers["credit_limit"].median()
+# Impute credit_limit with median derived strictly from training customers
+median_credit = customers.loc[customers["customer_id"].isin(train_cust_set), "credit_limit"].median()
 customers["credit_limit"] = customers["credit_limit"].fillna(median_credit)
 
-# Impute pages_viewed in sessions with median
-median_pages = sessions["pages_viewed"].median()
+# Impute pages_viewed in sessions with median derived strictly from training customer sessions
+train_sess_mask = sessions["customer_id"].isin(train_cust_set)
+median_pages = sessions.loc[train_sess_mask, "pages_viewed"].median()
 sessions["pages_viewed"] = sessions["pages_viewed"].fillna(median_pages)
 
 print("Remaining Missing Values in Customers:   ", customers[["email_open_rate", "age", "credit_limit"]].isnull().sum().sum())
@@ -429,23 +457,24 @@ print("Remaining Missing Values in Transactions:", transactions["order_value"].i
 
 
 #=======================
-#       Outlier Handling (Capping / Winsorization)
+#       Outlier Handling (Capping / Winsorization - Train Set Only)
 #=======================
 
 print("\n" + "=" * 50)
-print("Outlier Treatment (Capping)")
+print("Outlier Treatment (Capping Derived Strictly from Train Data)")
 print("=" * 50)
 
-# Cap order_value at 99th percentile to prevent skewing customer aggregated spend
-order_val_p99 = transactions["order_value"].quantile(0.99)
-print(f"Order Value 99th Percentile Cap: {order_val_p99:.2f}")
+# Cap order_value at 99th percentile derived strictly from training customer transactions
+train_trans_mask = transactions["customer_id"].isin(train_cust_set)
+order_val_p99 = transactions.loc[train_trans_mask, "order_value"].quantile(0.99)
+print(f"Order Value 99th Percentile Cap (Train Only): {order_val_p99:.2f}")
 print("Order Value Max Before Capping: ", transactions["order_value"].max())
 transactions["order_value"] = transactions["order_value"].clip(upper=order_val_p99)
 print("Order Value Max After Capping:  ", transactions["order_value"].max())
 
-# Cap session_duration at 99th percentile
-session_dur_p99 = sessions["session_duration"].quantile(0.99)
-print(f"\nSession Duration 99th Percentile Cap: {session_dur_p99:.2f}")
+# Cap session_duration at 99th percentile derived strictly from training customer sessions
+session_dur_p99 = sessions.loc[train_sess_mask, "session_duration"].quantile(0.99)
+print(f"\nSession Duration 99th Percentile Cap (Train Only): {session_dur_p99:.2f}")
 print("Session Duration Max Before Capping: ", sessions["session_duration"].max())
 sessions["session_duration"] = sessions["session_duration"].clip(upper=session_dur_p99)
 print("Session Duration Max After Capping:  ", sessions["session_duration"].max())
@@ -459,19 +488,31 @@ print("\n" + "=" * 50)
 print("Feature Engineering: Customer Profile & Tenure")
 print("=" * 50)
 
-# Derive tenure relative to the latest date across the ecosystem
-reference_date = pd.to_datetime("2023-12-31")
+# Derive tenure relative to the true latest date across ecosystem (eliminating negative tenure & recency)
+reference_date = max(
+    customers["signup_date"].max(),
+    sessions["session_timestamp"].max(),
+    transactions["transaction_timestamp"].max()
+)
+print(f"Observation Cutoff Reference Date: {reference_date.date()}")
 
 customers["signup_year"] = customers["signup_date"].dt.year
 customers["signup_month"] = customers["signup_date"].dt.month
 customers["customer_tenure_days"] = (reference_date - customers["signup_date"]).dt.days
 
-# Fill any missing tenure/date components with median
-customers["customer_tenure_days"] = customers["customer_tenure_days"].fillna(customers["customer_tenure_days"].median())
-customers["signup_year"] = customers["signup_year"].fillna(customers["signup_year"].median())
-customers["signup_month"] = customers["signup_month"].fillna(customers["signup_month"].median())
+# Fill any missing tenure/date components with median derived strictly from training customers
+train_cust_mask = customers["customer_id"].isin(train_cust_set)
+customers["customer_tenure_days"] = customers["customer_tenure_days"].fillna(
+    customers.loc[train_cust_mask, "customer_tenure_days"].median()
+)
+customers["signup_year"] = customers["signup_year"].fillna(
+    customers.loc[train_cust_mask, "signup_year"].median()
+)
+customers["signup_month"] = customers["signup_month"].fillna(
+    customers.loc[train_cust_mask, "signup_month"].median()
+)
 
-print("Engineered Customer Features:")
+print("Engineered Customer Features (Non-Negative Tenures):")
 print(customers[["customer_id", "signup_year", "signup_month", "customer_tenure_days"]].head(3))
 
 
@@ -657,9 +698,18 @@ master_df["spend_to_credit_ratio"] = master_df["total_spent"] / (master_df["cred
 # Impute unmapped geo features for rare customers without session records
 master_df["geo_ip_region"] = master_df["geo_ip_region"].fillna("region_unknown")
 master_df["region_tier"] = master_df["region_tier"].fillna("TierUnknown")
-master_df["average_income"] = master_df["average_income"].fillna(master_df["average_income"].median())
-master_df["urban_ratio"] = master_df["urban_ratio"].fillna(master_df["urban_ratio"].median())
-master_df["internet_penetration"] = master_df["internet_penetration"].fillna(master_df["internet_penetration"].median())
+
+# Impute geo features using medians derived strictly from training customers
+train_master_mask = master_df["customer_id"].isin(train_cust_set)
+master_df["average_income"] = master_df["average_income"].fillna(
+    master_df.loc[train_master_mask, "average_income"].median()
+)
+master_df["urban_ratio"] = master_df["urban_ratio"].fillna(
+    master_df.loc[train_master_mask, "urban_ratio"].median()
+)
+master_df["internet_penetration"] = master_df["internet_penetration"].fillna(
+    master_df.loc[train_master_mask, "internet_penetration"].median()
+)
 
 print("\nUnified Customer Master Feature Dataset:")
 print("Shape:", master_df.shape)
@@ -757,54 +807,62 @@ plt.show()
 
 
 #=======================
-#       Separate Features and Target
+#       Separate Features and Target (Strict Partitioning)
 #=======================
 
 # Merge master feature dataset with train target labels
 train_full = pd.merge(master_df, train_data, on="customer_id", how="inner")
 
-X = train_full.drop(["customer_id", "target", "signup_date", "referral_code",
-                     "noise_customer_0", "noise_customer_1", "noise_customer_2",
-                     "noise_customer_3", "noise_customer_4",
-                     "pages_per_session", "signup_year"], axis=1)
-y = train_full["target"]
+drop_cols = [
+    "customer_id", "target", "signup_date", "referral_code",
+    "noise_customer_0", "noise_customer_1", "noise_customer_2",
+    "noise_customer_3", "noise_customer_4",
+    "pages_per_session", "signup_year"
+]
 
-print("\nFeatures Shape:", X.shape)
-print("Target Shape:  ", y.shape)
+cat_cols = [
+    "country_code", "region", "customer_tier",
+    "geo_ip_region", "region_tier", "primary_campaign_type"
+]
 
+# Partition strictly using the pre-established customer sets
+train_split = train_full[train_full["customer_id"].isin(train_cust_set)].copy()
+val_split = train_full[train_full["customer_id"].isin(set(val_cust_ids))].copy()
 
-#=======================
-#       Clean and Encode Categories
-#=======================
+X_train_raw = train_split.drop(columns=drop_cols)
+y_train = train_split["target"]
 
-X = pd.get_dummies(
-    X,
-    columns=["country_code", "region", "customer_tier", "geo_ip_region", "region_tier", "primary_campaign_type"],
-    drop_first=True,
-    dtype=int
-)
+X_val_raw = val_split.drop(columns=drop_cols)
+y_val = val_split["target"]
 
-print("\nFeatures Shape After Encoding:", X.shape)
-
-
-#=======================
-#       Train-Validation Split
-#=======================
-
-X_train, X_val, y_train, y_val = train_test_split(
-    X,
-    y,
-    test_size=0.20,
-    random_state=42,
-    stratify=y
-)
-
-print("\nTraining Set Shape:  ", X_train.shape)
-print("Validation Set Shape:", X_val.shape)
+print("\nX_train Raw Shape:", X_train_raw.shape)
+print("X_val Raw Shape:  ", X_val_raw.shape)
 
 
 #=======================
-#       Scale Features
+#       Encode Categories (OneHotEncoder Fit on Train Only)
+#=======================
+
+# Fit encoder strictly on X_train to prevent categorical lookahead leakage
+ohe = OneHotEncoder(drop="first", sparse_output=False, handle_unknown="ignore")
+X_train_cat = ohe.fit_transform(X_train_raw[cat_cols])
+X_val_cat = ohe.transform(X_val_raw[cat_cols])
+
+cat_feature_names = ohe.get_feature_names_out(cat_cols)
+num_cols = [c for c in X_train_raw.columns if c not in cat_cols]
+
+X_train_cat_df = pd.DataFrame(X_train_cat, columns=cat_feature_names, index=X_train_raw.index)
+X_val_cat_df = pd.DataFrame(X_val_cat, columns=cat_feature_names, index=X_val_raw.index)
+
+X_train = pd.concat([X_train_raw[num_cols], X_train_cat_df], axis=1)
+X_val = pd.concat([X_val_raw[num_cols], X_val_cat_df], axis=1)
+
+print("\nFeatures Shape After Encoding (Train):", X_train.shape)
+print("Features Shape After Encoding (Val):  ", X_val.shape)
+
+
+#=======================
+#       Scale Features (StandardScaler Fit on Train Only)
 #=======================
 
 scaler = StandardScaler()
@@ -812,7 +870,7 @@ scaler = StandardScaler()
 X_train_scaled = scaler.fit_transform(X_train)
 X_val_scaled = scaler.transform(X_val)
 
-print("\nFeatures Scaled Successfully.")
+print("\nFeatures Scaled Successfully (Fit on Train, Transformed Val).")
 
 
 #=======================
@@ -831,22 +889,448 @@ print("Model Training Complete.")
 
 
 #=======================
-#       Model Predictions & Evaluation
+#       Helper: Optimal Threshold Search
 #=======================
 
-y_pred = model.predict(X_val_scaled)
-y_prob = model.predict_proba(X_val_scaled)[:, 1]
-
-print("\nValidation Accuracy:", model.score(X_val_scaled, y_val))
-
-print("\nConfusion Matrix:")
-print(confusion_matrix(y_val, y_pred))
-
-print("\nClassification Report:")
-print(classification_report(y_val, y_pred))
-
-print("ROC-AUC Score:", roc_auc_score(y_val, y_prob))
-
-
+def find_optimal_threshold(y_true, y_prob):
+    """Searches probability thresholds to maximize F1-score on positive churn class."""
+    thresholds = np.linspace(0.10, 0.90, 81)
+    best_th = 0.50
+    best_f1 = -1.0
+    for th in thresholds:
+        pred = (y_prob >= th).astype(int)
+        score = f1_score(y_true, pred, zero_division=0)
+        if score > best_f1:
+            best_f1 = score
+            best_th = th
+    return round(best_th, 3)
 
 
+#=======================
+#       Model Predictions & Evaluation (Logistic Regression)
+#=======================
+
+y_pred_lr = model.predict(X_val_scaled)
+y_prob_lr = model.predict_proba(X_val_scaled)[:, 1]
+
+# Default threshold evaluation (p = 0.50)
+print("\nLogistic Regression (Default p = 0.50):")
+print("Validation Accuracy:", accuracy_score(y_val, y_pred_lr))
+print("Classification Report:")
+print(classification_report(y_val, y_pred_lr))
+print("ROC-AUC Score:", roc_auc_score(y_val, y_prob_lr))
+
+# Optimal threshold evaluation
+opt_th_lr = find_optimal_threshold(y_val, y_prob_lr)
+y_pred_lr_opt = (y_prob_lr >= opt_th_lr).astype(int)
+
+print(f"\nLogistic Regression (Optimal F1 Threshold p = {opt_th_lr:.3f}):")
+print("Validation Accuracy:", accuracy_score(y_val, y_pred_lr_opt))
+print("Recall (Churn Caught):", recall_score(y_val, y_pred_lr_opt))
+print("F1-Score:             ", f1_score(y_val, y_pred_lr_opt))
+print("Confusion Matrix:")
+print(confusion_matrix(y_val, y_pred_lr_opt))
+
+models_results = [
+    {
+        "Model": "Logistic Regression (Default)",
+        "Algorithm": "Logistic Regression",
+        "Threshold": 0.50,
+        "Accuracy": accuracy_score(y_val, y_pred_lr),
+        "Precision": precision_score(y_val, y_pred_lr, zero_division=0),
+        "Recall": recall_score(y_val, y_pred_lr),
+        "F1-Score": f1_score(y_val, y_pred_lr),
+        "ROC-AUC": roc_auc_score(y_val, y_prob_lr),
+        "y_pred": y_pred_lr,
+        "y_prob": y_prob_lr
+    },
+    {
+        "Model": f"Logistic Regression (p={opt_th_lr:.2f})",
+        "Algorithm": "Logistic Regression",
+        "Threshold": opt_th_lr,
+        "Accuracy": accuracy_score(y_val, y_pred_lr_opt),
+        "Precision": precision_score(y_val, y_pred_lr_opt, zero_division=0),
+        "Recall": recall_score(y_val, y_pred_lr_opt),
+        "F1-Score": f1_score(y_val, y_pred_lr_opt),
+        "ROC-AUC": roc_auc_score(y_val, y_prob_lr),
+        "y_pred": y_pred_lr_opt,
+        "y_prob": y_prob_lr
+    }
+]
+
+
+#=======================
+#       Model Implementation (K-Nearest Neighbors)
+#=======================
+
+print("\n" + "=" * 50)
+print("Model Implementation: K-Nearest Neighbors (KNN)")
+print("=" * 50)
+
+knn_model = KNeighborsClassifier(n_neighbors=5)
+
+print("\nTraining K-Nearest Neighbors Model...")
+knn_model.fit(X_train_scaled, y_train)
+print("KNN Training Complete.")
+
+y_prob_knn = knn_model.predict_proba(X_val_scaled)[:, 1]
+y_pred_knn = (y_prob_knn >= 0.5).astype(int)
+
+print("\nKNN Validation Accuracy:", accuracy_score(y_val, y_pred_knn))
+print("\nKNN Confusion Matrix:")
+print(confusion_matrix(y_val, y_pred_knn))
+print("\nKNN Classification Report:")
+print(classification_report(y_val, y_pred_knn))
+print("KNN ROC-AUC Score:", roc_auc_score(y_val, y_prob_knn))
+
+models_results.append({
+    "Model": "K-Nearest Neighbors",
+    "Algorithm": "K-Nearest Neighbors",
+    "Threshold": 0.50,
+    "Accuracy": accuracy_score(y_val, y_pred_knn),
+    "Precision": precision_score(y_val, y_pred_knn, zero_division=0),
+    "Recall": recall_score(y_val, y_pred_knn),
+    "F1-Score": f1_score(y_val, y_pred_knn),
+    "ROC-AUC": roc_auc_score(y_val, y_prob_knn),
+    "y_pred": y_pred_knn,
+    "y_prob": y_prob_knn
+})
+
+
+#=======================
+#       Model Implementation (Naive Bayes)
+#=======================
+
+print("\n" + "=" * 50)
+print("Model Implementation: Naive Bayes (GaussianNB)")
+print("=" * 50)
+
+nb_model = GaussianNB()
+
+print("\nTraining Naive Bayes Model...")
+nb_model.fit(X_train_scaled, y_train)
+print("Naive Bayes Training Complete.")
+
+y_pred_nb = nb_model.predict(X_val_scaled)
+y_prob_nb = nb_model.predict_proba(X_val_scaled)[:, 1]
+
+print("\nNaive Bayes Validation Accuracy:", accuracy_score(y_val, y_pred_nb))
+print("\nNaive Bayes Confusion Matrix:")
+print(confusion_matrix(y_val, y_pred_nb))
+print("\nNaive Bayes Classification Report:")
+print(classification_report(y_val, y_pred_nb))
+print("Naive Bayes ROC-AUC Score:", roc_auc_score(y_val, y_prob_nb))
+
+models_results.append({
+    "Model": "Naive Bayes",
+    "Algorithm": "Naive Bayes",
+    "Threshold": 0.50,
+    "Accuracy": accuracy_score(y_val, y_pred_nb),
+    "Precision": precision_score(y_val, y_pred_nb, zero_division=0),
+    "Recall": recall_score(y_val, y_pred_nb),
+    "F1-Score": f1_score(y_val, y_pred_nb),
+    "ROC-AUC": roc_auc_score(y_val, y_prob_nb),
+    "y_pred": y_pred_nb,
+    "y_prob": y_prob_nb
+})
+
+
+#=======================
+#       Model Implementation (Decision Tree)
+#=======================
+
+print("\n" + "=" * 50)
+print("Model Implementation: Decision Tree")
+print("=" * 50)
+
+dt_model = DecisionTreeClassifier(
+    max_depth=6,
+    random_state=42,
+    class_weight="balanced"
+)
+
+print("\nTraining Decision Tree Model...")
+dt_model.fit(X_train_scaled, y_train)
+print("Decision Tree Training Complete.")
+
+y_pred_dt = dt_model.predict(X_val_scaled)
+y_prob_dt = dt_model.predict_proba(X_val_scaled)[:, 1]
+
+# Default threshold evaluation (p = 0.50)
+print("\nDecision Tree (Default p = 0.50):")
+print("Validation Accuracy:", accuracy_score(y_val, y_pred_dt))
+print("Classification Report:")
+print(classification_report(y_val, y_pred_dt))
+print("ROC-AUC Score:", roc_auc_score(y_val, y_prob_dt))
+
+# Optimal threshold evaluation
+opt_th_dt = find_optimal_threshold(y_val, y_prob_dt)
+y_pred_dt_opt = (y_prob_dt >= opt_th_dt).astype(int)
+
+print(f"\nDecision Tree (Optimal F1 Threshold p = {opt_th_dt:.3f}):")
+print("Validation Accuracy:", accuracy_score(y_val, y_pred_dt_opt))
+print("Recall (Churn Caught):", recall_score(y_val, y_pred_dt_opt))
+print("F1-Score:             ", f1_score(y_val, y_pred_dt_opt))
+print("Confusion Matrix:")
+print(confusion_matrix(y_val, y_pred_dt_opt))
+
+models_results.extend([
+    {
+        "Model": "Decision Tree (Default)",
+        "Algorithm": "Decision Tree",
+        "Threshold": 0.50,
+        "Accuracy": accuracy_score(y_val, y_pred_dt),
+        "Precision": precision_score(y_val, y_pred_dt, zero_division=0),
+        "Recall": recall_score(y_val, y_pred_dt),
+        "F1-Score": f1_score(y_val, y_pred_dt),
+        "ROC-AUC": roc_auc_score(y_val, y_prob_dt),
+        "y_pred": y_pred_dt,
+        "y_prob": y_prob_dt
+    },
+    {
+        "Model": f"Decision Tree (p={opt_th_dt:.2f})",
+        "Algorithm": "Decision Tree",
+        "Threshold": opt_th_dt,
+        "Accuracy": accuracy_score(y_val, y_pred_dt_opt),
+        "Precision": precision_score(y_val, y_pred_dt_opt, zero_division=0),
+        "Recall": recall_score(y_val, y_pred_dt_opt),
+        "F1-Score": f1_score(y_val, y_pred_dt_opt),
+        "ROC-AUC": roc_auc_score(y_val, y_prob_dt),
+        "y_pred": y_pred_dt_opt,
+        "y_prob": y_prob_dt
+    }
+])
+
+
+#=======================
+#       Model Performance Comparison
+#=======================
+
+print("\n" + "=" * 50)
+print("Model Evaluation & Metrics Comparison Summary")
+print("=" * 50)
+
+comparison_df = pd.DataFrame([{
+    "Model": r["Model"],
+    "Threshold": f"{r['Threshold']:.2f}",
+    "Accuracy": round(r["Accuracy"], 4),
+    "Precision": round(r["Precision"], 4),
+    "Recall": round(r["Recall"], 4),
+    "F1-Score": round(r["F1-Score"], 4),
+    "ROC-AUC": round(r["ROC-AUC"], 4)
+} for r in models_results])
+
+print("\nSummary Comparison Table (Ranked by F1-Score):")
+print(comparison_df.sort_values(by="F1-Score", ascending=False).to_string(index=False))
+
+best_f1_entry = comparison_df.sort_values(by="F1-Score", ascending=False).iloc[0]
+best_auc_entry = comparison_df.sort_values(by="ROC-AUC", ascending=False).iloc[0]
+print(f"\nBest Model by F1-Score: {best_f1_entry['Model']} (F1 = {best_f1_entry['F1-Score']:.4f}, Recall = {best_f1_entry['Recall']:.4f})")
+print(f"Best Model by ROC-AUC:  {best_auc_entry['Model']} (AUC = {best_auc_entry['ROC-AUC']:.4f})")
+
+
+#=======================
+#       Comparative Visualizations
+#=======================
+
+# 1. Bar Chart: Performance Metrics Across Models
+metrics_melted = comparison_df.melt(
+    id_vars=["Model"],
+    value_vars=["Accuracy", "Precision", "Recall", "F1-Score", "ROC-AUC"],
+    var_name="Metric",
+    value_name="Score"
+)
+
+plt.figure(figsize=(14, 6))
+sns.barplot(x="Metric", y="Score", hue="Model", data=metrics_melted, palette="Set2")
+plt.title("Model Performance Metrics Comparison Across Decision Thresholds", fontsize=14, pad=12)
+plt.ylim(0, 1.05)
+plt.ylabel("Score")
+plt.xlabel("Evaluation Metric")
+plt.legend(title="Configuration", bbox_to_anchor=(1.02, 1), loc="upper left")
+plt.grid(axis="y", linestyle="--", alpha=0.6)
+plt.tight_layout()
+plt.show()
+
+# 2. ROC Curves Comparison (Unique Algorithms)
+plt.figure(figsize=(9, 7))
+seen_algos = set()
+for r in models_results:
+    algo = r["Algorithm"]
+    if algo not in seen_algos:
+        seen_algos.add(algo)
+        fpr, tpr, _ = roc_curve(y_val, r["y_prob"])
+        plt.plot(fpr, tpr, label=f"{algo} (AUC = {r['ROC-AUC']:.4f})", linewidth=2)
+
+plt.plot([0, 1], [0, 1], "k--", label="Random Chance (AUC = 0.5000)", alpha=0.7)
+plt.title("Receiver Operating Characteristic (ROC) Curves", fontsize=14, pad=12)
+plt.xlabel("False Positive Rate (1 - Specificity)")
+plt.ylabel("True Positive Rate (Sensitivity / Recall)")
+plt.legend(loc="lower right")
+plt.grid(True, linestyle="--", alpha=0.6)
+plt.tight_layout()
+plt.show()
+
+# 3. Confusion Matrices 2x2 Subplots (Threshold-Optimized Operational Grid)
+plot_models = [
+    [r for r in models_results if r["Model"].startswith("Decision Tree (p=")][0],
+    [r for r in models_results if r["Model"].startswith("Logistic Regression (p=")][0],
+    [r for r in models_results if r["Model"] == "K-Nearest Neighbors"][0],
+    [r for r in models_results if r["Model"] == "Naive Bayes"][0]
+]
+
+fig, axes = plt.subplots(2, 2, figsize=(11, 9))
+axes = axes.flatten()
+
+for idx, r in enumerate(plot_models):
+    cm = confusion_matrix(y_val, r["y_pred"])
+    sns.heatmap(
+        cm,
+        annot=True,
+        fmt="d",
+        cmap="Blues",
+        cbar=False,
+        ax=axes[idx],
+        annot_kws={"size": 13}
+    )
+    axes[idx].set_title(f"{r['Model']}\nConfusion Matrix", fontsize=11)
+    axes[idx].set_xlabel("Predicted Label")
+    axes[idx].set_ylabel("Actual Label")
+    axes[idx].set_xticklabels(["Retained (0)", "Churned (1)"])
+    axes[idx].set_yticklabels(["Retained (0)", "Churned (1)"])
+
+plt.tight_layout()
+plt.show()
+
+#=======================
+#       Check Model Variables
+#=======================
+
+print("Available model variables:")
+
+for name, value in globals().copy().items():
+    if "model" in name.lower() or "tree" in name.lower():
+        if hasattr(value, "predict"):
+            print(name, "->", type(value).__name__)
+            
+#=======================
+#       Check Model Readiness
+#=======================
+
+
+models_to_check = {
+    "Logistic Regression": model,
+    "KNN": knn_model,
+    "Naive Bayes": nb_model,
+    "Decision Tree": dt_model
+}
+
+for name, clf in models_to_check.items():
+    try:
+        clf.predict(X_train_scaled[:1])
+        print(name, "-> Fitted and ready")
+    except Exception as e:
+        print(name, "-> Not ready:", str(e))
+
+print("Preprocessor available:", "preprocessor" in globals())
+print("Raw training data available:", "X_train" in globals())
+print("Processed training data available:", "X_train_processed" in globals())
+
+#=======================
+#       Check Preprocessing Variables
+#=======================
+
+for name in globals():
+    if any(word in name.lower() for word in [
+        "preprocess", "transform", "scaled", "encoded", "imputer"
+    ]):
+        print(name)
+        
+#===============================================================================================
+
+import joblib
+
+#=======================
+#       Save Model Artifacts
+#=======================
+
+# Create folder for saved model files
+os.makedirs("models", exist_ok=True)
+
+# Save model, encoder, scaler, feature columns, and threshold
+joblib.dump(
+    {
+        "model": dt_model,
+        "encoder": ohe,
+        "scaler": scaler,
+        "numeric_columns": num_cols,
+        "categorical_columns": cat_cols,
+        "feature_columns": X_train.columns.tolist(),
+        "threshold": opt_th_dt
+    },
+    "models/retention_model.pkl"
+)
+
+print("\nModel artifacts saved successfully!")
+print("File: models/retention_model.pkl")
+print("Decision Tree threshold:", opt_th_dt)
+
+#=======================
+#       Verify Saved Model
+#=======================
+
+saved_artifacts = joblib.load("models/retention_model.pkl")
+
+print("\nSaved Model Verification:")
+print("Model:", type(saved_artifacts["model"]).__name__)
+print("Encoder:", type(saved_artifacts["encoder"]).__name__)
+print("Scaler:", type(saved_artifacts["scaler"]).__name__)
+print("Feature count:", len(saved_artifacts["feature_columns"]))
+print("Threshold:", saved_artifacts["threshold"])
+
+#=======================
+#       Test Model Prediction
+#=======================
+
+# Select one validation customer
+sample_raw = X_val_raw.iloc[[0]].copy()
+
+# Apply the saved encoder
+sample_cat = saved_artifacts["encoder"].transform(
+    sample_raw[saved_artifacts["categorical_columns"]]
+)
+
+sample_cat_df = pd.DataFrame(
+    sample_cat,
+    columns=saved_artifacts["encoder"].get_feature_names_out(
+        saved_artifacts["categorical_columns"]
+    ),
+    index=sample_raw.index
+)
+
+# Rebuild features in the original training order
+sample_numeric = sample_raw[saved_artifacts["numeric_columns"]]
+
+sample_features = pd.concat([sample_numeric, sample_cat_df], axis=1)
+sample_features = sample_features[saved_artifacts["feature_columns"]]
+
+# Apply saved scaler
+sample_scaled = saved_artifacts["scaler"].transform(sample_features)
+
+# Predict probability and class
+probability = saved_artifacts["model"].predict_proba(sample_scaled)[0, 1]
+prediction = int(probability >= saved_artifacts["threshold"])
+
+print("\nTest Prediction:")
+print("Predicted probability of class 1:", round(probability, 4))
+print("Predicted class:", prediction)
+print("Actual class:", int(y_val.iloc[0]))
+
+#=======================
+#       Export Test Input
+#=======================
+
+sample_input = X_val_raw.iloc[0][num_cols + cat_cols]
+
+print("\nSample API Input:")
+print(sample_input.to_json())
