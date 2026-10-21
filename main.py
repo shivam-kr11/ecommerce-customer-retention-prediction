@@ -13,16 +13,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.naive_bayes import GaussianNB
 from sklearn.tree import DecisionTreeClassifier
-from sklearn.metrics import (
-    classification_report,
-    confusion_matrix,
-    roc_auc_score,
-    accuracy_score,
-    precision_score,
-    recall_score,
-    f1_score,
-    roc_curve
-)
+from sklearn.metrics import (classification_report, confusion_matrix,roc_auc_score, accuracy_score,precision_score,recall_score,f1_score,roc_curve)
 
 
 #=======================
