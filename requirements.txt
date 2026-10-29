@@ -1,0 +1,11 @@
+numpy
+pandas
+scikit-learn==1.8.0
+matplotlib
+seaborn
+xgboost==3.4.1
+joblib
+fastapi
+uvicorn
+streamlit
+requests

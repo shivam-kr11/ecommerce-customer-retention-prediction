@@ -20,14 +20,14 @@ The intelligence engine merges five distinct operational sources into a unified 
 
 ```
  customers.csv (200k)  ──┐
- sessions.csv (2M)     ──┼──> Data Cleaning ──> Feature Engineering ──> Leakage-Free ──> Models & Threshold
+ sessions.csv (1.05M)* ──┼──> Data Cleaning ──> Feature Engineering ──> Leakage-Free ──> Models & Threshold
  transactions.csv (500k)─┼     & Parsing        & Ratios (Master DF)      Partitioning      Optimization
  marketing_campaigns.csv ─┤
  geo_data.csv            ─┘
 ```
 
 1. **Customers Profile** (Demographics, loyalty score, credit limit, tenure).
-2. **Web Sessions (2,000,000 rows)** (Bounce rates, dwell times, pages viewed, cart additions).
+2. **Web Sessions (1,048,575 rows currently available)** (Bounce rates, dwell times, pages viewed, cart additions). The pipeline documentation previously expected 2,000,000 rows; the local CSV has exactly 1,048,575 data rows, so the full source file is needed to restore the missing records.
 3. **Transaction Logs (500,000 rows)** (Order values, items per basket, discount usage, purchase recency).
 4. **Marketing Signals** (Campaign channel affinities and allocated ad budgets).
 5. **Geo-economic Context** (Regional average income, urban density, and internet penetration).
@@ -41,6 +41,7 @@ Rather than feeding raw aggregates straight into algorithms, we engineered cross
 - **Cart-to-Order Conversion**: $\frac{\text{Total Transactions}}{\text{Total Cart Additions} + 1}$ — reveals purchase hesitation.
 - **Monetary Spend Velocity**: $\frac{\text{Total Spend}}{\text{Total Sessions} + 1}$ — distinguishes window-shoppers from high-intent buyers.
 - **Spend-to-Credit Ratio**: $\frac{\text{Total Spend}}{\text{Credit Limit} + 1}$ — measures financial engagement depth.
+- **Recent Activity Windows**: Session and purchase counts over the last 30, 90, and 180 days, plus recent 90-day spend share.
 - **Non-Negative Recency & Tenure**: Measured against dynamic historical observation cutoffs to prevent lookahead distortion.
 
 ---
@@ -49,30 +50,32 @@ Rather than feeding raw aggregates straight into algorithms, we engineered cross
 
 Data leakage is the easiest way to fool yourself with fake high scores in offline ML. We audited and eliminated three major risks:
 
-1. **No Temporal Inversion**: Replaced static reference dates with dynamic observation boundaries (`2024-09-26`), completely eliminating negative tenures and negative recency values.
-2. **Upfront Customer-Level Partitioning**: All median imputations (`age`, `email_open_rate`, `credit_limit`, `pages_viewed`, `average_income`) and 99th percentile outlier clipping thresholds are calculated **strictly on training customers** (`128,000` samples) before touching the validation set (`32,000` samples).
-3. **Isolated Preprocessing**: `OneHotEncoder(handle_unknown="ignore")` and `StandardScaler` are fit exclusively on `X_train` and applied downstream to `X_val`.
+1. **No Temporal Inversion**: Dates are parsed and recency/tenure are measured against the latest event date in the available data (`2024-09-26`).
+2. **Customer-Level Holdout**: The labelled customers are split into 128,000 training customers and 32,000 final validation customers. A separate 20% calibration split within training selects probability thresholds; the final validation labels are not used for threshold tuning.
+3. **Training-Only Preprocessing and Feature Assessment**: Imputation, outlier caps, category encoding, scaling, and three-fold feature-importance assessment use training data only. The final validation customers are used once for model evaluation.
 
 ---
 
 ## 📊 Model Benchmark & Comparison
 
-All models were evaluated on an identical **32,000-customer stratified validation holdout**:
+The pipeline ranks candidate inputs using three-fold feature-importance stability on the training split, then trains all models with the same **eight raw input features**. Numeric inputs are scaled and `region` is one-hot encoded, so the model matrix contains more than eight columns. Each of the seven classifiers receives a small `GridSearchCV` search scored by average precision, using three-fold stratified CV on a 20,000-row sample from the model-fit training partition. The search settings are saved in `reports/model_tuning_summary.csv` and the selected settings in `models/retention_model.pkl`. Thresholds are calibrated on a separate training subset; the 32,000-customer validation holdout is reserved for final comparison.
 
-| Model | Decision Threshold ($p$) | Accuracy | Precision | Recall (Churn Caught) | F1-Score | ROC-AUC |
+The current selected inputs are `loyalty_score`, `age`, `discount_usage_rate`, `email_open_rate`, `avg_cart_additions`, `avg_review_score`, `spend_to_credit_ratio`, and `region`.
+
+| Model | Threshold | Accuracy | Precision | Recall | F1-Score | ROC-AUC |
 | :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| 🌲 **Decision Tree (Tuned)** | **$p = 0.47$** | **51.70%** | **24.67%** | **67.15%** | **0.3609** | **0.6040** |
-| 🌲 Decision Tree (Default) | $p = 0.50$ | 56.17% | 25.28% | 59.26% | 0.3544 | **0.6040** |
-| 📈 **Logistic Regression (Tuned)**| **$p = 0.46$** | **47.98%** | **23.90%** | **71.53%** | **0.3583** | **0.5987** |
-| 📈 Logistic Regression (Default)| $p = 0.50$ | 57.93% | 25.35% | 55.12% | 0.3472 | 0.5987 |
-| 🔍 K-Nearest Neighbors | $p = 0.50$ | 76.12% | 20.65% | 6.20% | 0.0954 | 0.5018 |
-| 🎲 Naive Bayes (Gaussian) | $p = 0.50$ | 21.00% | 20.32% | 98.95% | 0.3371 | 0.5123 |
+| **XGBoost (saved model)** | **0.48** | 51.70% | 24.86% | 68.20% | **0.3644** | **0.6154** |
+| Gradient Boosting | 0.46 | 48.01% | 24.24% | 73.40% | **0.3644** | 0.6124 |
+| AdaBoost | 0.40 | 44.99% | 23.69% | **76.93%** | 0.3622 | 0.6105 |
+| Logistic Regression | 0.47 | 50.18% | 24.27% | 68.57% | 0.3585 | 0.5994 |
+| Decision Tree | 0.45 | 50.51% | 24.30% | 67.95% | 0.3580 | 0.6014 |
+| K-Nearest Neighbors | 0.20 | **56.60%** | 22.60% | 46.90% | 0.3050 | 0.5411 |
+| Naive Bayes | 0.20 | 49.64% | 20.39% | 50.95% | 0.2912 | 0.5074 |
 
-### 💡 Why Tuning the Threshold Matters
-Because churners make up only ~20% of the customer base, defaulting to standard $p = 0.50$ leaves money on the table.
-- Lowering the Decision Tree cutoff to **$p = 0.47$** boosted recall from **59.26% to 67.15%** (**+513 additional churners caught**).
-- Lowering the Logistic Regression cutoff to **$p = 0.46$** pushed recall to **71.53%** (**+1,066 churners caught**).
-- In real-world e-commerce, offering a coupon to a slightly borderline shopper is vastly cheaper than permanently losing a customer.
+The tuned XGBoost result is close to the earlier untuned AdaBoost F1 (0.3665), but does not improve on it. Model ranking quality and recall remain modest; tuning should be treated as a measured search, not a guaranteed performance gain.
+
+### Threshold and class balance
+Churn represents about 20.3% of labelled customers. Accuracy alone is therefore not a useful selection metric. Thresholds are calibrated separately from the final holdout; use precision and recall together to choose an operational point that fits campaign capacity and cost.
 
 ---
 
@@ -101,8 +104,15 @@ cd ecommerce-retention-intelligence
 python -m venv .venv
 source .venv/bin/activate        # On Windows: .venv\Scripts\activate
 
-# Install dependencies
-pip install numpy pandas scikit-learn matplotlib seaborn
+# Install dependencies into the active virtual environment
+python -m pip install -r requirements.txt
+```
+
+On Windows PowerShell, you can run the install and app commands explicitly through the project environment:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m uvicorn app:app --reload
 ```
 
 ### 2. Add Raw Data
@@ -117,9 +127,20 @@ This executes the data cleaning, feature creation, leak-free validation split, m
 
 ---
 
+## 🖥️ Interactive Streamlit App
+
+Run the API with `python -m uvicorn app:app --reload`, then launch the interface in a second terminal with `streamlit run streamlit_app.py`. On Windows, use the `.venv\Scripts\python.exe` and `.venv\Scripts\streamlit.exe` commands so both processes use the installed project dependencies. The app includes one prediction page, a dashboard, model insights, and session prediction history.
+
+### Customer prediction page
+
+The **Prediction** page collects the active model's selected features plus customer name and phone. A random customer ID is generated; name and phone are stored with the input values, predicted class, probability, threshold, model name, and timestamp in `data/submissions/prediction_inputs.json`. Only the model features are sent to the API. The **Prediction History** sidebar page reads saved records, supports class, ID, and name filtering, exports filtered results as CSV or JSON, and can remove selected records after confirmation. The JSON file can contain customer contact details; it is ignored by Git, and authentication is not implemented yet, so keep this demo local.
+
 ## 🔮 What’s Next on the Roadmap
 
-- [ ] **Gradient Boosted Ensembles**: Benchmarking LightGBM, XGBoost, and CatBoost with `scale_pos_weight` tuning.
-- [ ] **RFM Velocity Features**: Adding 30d vs. 90d activity decay momentum features.
+- [x] **Boosting benchmarks**: AdaBoost, Gradient Boosting, and XGBoost are included in the current comparison.
+- [ ] **Further boosting experiments**: Benchmark LightGBM and CatBoost with validation-safe class-imbalance tuning.
+- [ ] **Restore Complete Session Data**: Replace the local 1,048,575-row sessions file with the expected 2,000,000-row source before retraining.
+- [ ] **Time-Based Holdout**: Validate on a later observation window to measure performance on future customer behavior.
 - [ ] **Target Encoding**: Replacing sparse one-hot geographic vectors with compact target-encoded regional churn rates.
-- [ ] **Automated Hyperparameter Tuning**: Integrating Optuna with 5-fold Stratified Cross Validation.
+- [x] **Hyperparameter tuning**: Three-fold stratified `GridSearchCV` across all seven classifiers; see `reports/model_tuning_summary.csv` for selected parameters and CV scores.
+- [ ] **Further tuning**: Expand the search ranges and evaluate LightGBM/CatBoost with a nested or later time-based holdout.

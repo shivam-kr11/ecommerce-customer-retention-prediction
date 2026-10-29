@@ -5,6 +5,8 @@
 import html
 import json
 from datetime import datetime
+from pathlib import Path
+from uuid import uuid4
 
 import pandas as pd
 import requests
@@ -22,7 +24,12 @@ st.set_page_config(
 )
 
 API_URL = "http://127.0.0.1:8000"
-PAGES = ["Dashboard", "Customer Prediction", "Prediction History", "Model Insights"]
+PAGES = [
+    "Dashboard",
+    "Prediction",
+    "Prediction History",
+    "Model Insights",
+]
 
 # Result words and colors for each model class.
 # CHECK THIS: swap the words if your target is the other way round
@@ -341,53 +348,62 @@ if "navigation" not in st.session_state:
     st.session_state.navigation = PAGES[0]
 
 
-PERSONAL_KEYS = ["customer_id", "customer_name", "customer_phone", "customer_email"]
-
-DEFAULTS = {
-    "customer_id": "", "customer_name": "", "customer_phone": "", "customer_email": "",
-    "age": 35, "customer_tier": "Silver", "loyalty_score": 0.371,
-    "avg_review_score": 3.9663, "credit_limit": 13128.0, "signup_month": 10,
-    "customer_tenure_days": 346, "country_code": "IN", "region": "region_33",
-    "total_sessions": 13, "avg_session_duration": 375.5337, "total_pages_viewed": 79,
-    "avg_pages_viewed": 6.0769, "total_cart_additions": 23, "avg_cart_additions": 1.7692,
-    "bounce_rate": 0.7692, "recency_session_days": 25,
-    "total_transactions": 2, "total_spent": 284.05, "avg_order_value": 142.025,
-    "max_order_value": 176.88, "total_items": 8, "avg_items_per_order": 4.0,
-    "discount_trans_ratio": 0.5, "recency_trans_days": 535,
-    "cart_to_order_ratio": 0.0833333, "spend_per_session": 20.2893,
-    "spend_to_credit_ratio": 0.0216353,
-    "email_open_rate": 0.2303, "discount_usage_rate": 0.1270,
-    "avg_campaign_budget": 200225.9231, "total_campaign_budget": 2602937.0,
-    "primary_campaign_type": "Social",
-    "geo_ip_region": "region_64", "region_tier": "Tier1",
-    "average_income": 62187.8873, "urban_ratio": 0.5204, "internet_penetration": 0.5623,
+PERSONAL_DEFAULTS = {
+    "customer_id": "",
+    "customer_name": "",
+    "customer_phone": "",
+    "customer_email": "",
 }
 
-FEATURE_KEYS = [key for key in DEFAULTS if key not in PERSONAL_KEYS]
-STEPS = ["Personal Info", "Profile", "Website", "Purchases", "Marketing", "Region"]
+FEATURE_DEFAULTS = {
+    "age": 35,
+    "loyalty_score": 0.371,
+    "discount_usage_rate": 0.127,
+    "email_open_rate": 0.2303,
+    "avg_cart_additions": 1.7692,
+    "avg_review_score": 3.9663,
+    "spend_to_credit_ratio": 0.0216353,
+    "region": "region_33",
+}
+
+FEATURE_CONTROLS = {
+    "age": {"label": "Customer age", "min_value": 18, "max_value": 100,
+            "step": 1, "format": "%d", "help": "Age in years."},
+    "loyalty_score": {"label": "Loyalty score", "min_value": 0.0,
+                       "max_value": 1.0, "step": 0.01, "format": "%.3f",
+                       "help": "Score from 0 to 1."},
+    "discount_usage_rate": {"label": "Discount usage rate", "min_value": 0.0,
+                             "max_value": 1.0, "step": 0.01, "format": "%.3f",
+                             "help": "Share of purchases using a discount."},
+    "email_open_rate": {"label": "Email open rate", "min_value": 0.0,
+                         "max_value": 1.0, "step": 0.01, "format": "%.3f",
+                         "help": "Share of marketing emails opened."},
+    "avg_cart_additions": {"label": "Average cart additions per session",
+                            "min_value": 0.0, "step": 0.1, "format": "%.2f",
+                            "help": "Average items added to cart in a session."},
+    "avg_review_score": {"label": "Average review score", "min_value": 0.0,
+                          "max_value": 5.0, "step": 0.1, "format": "%.2f",
+                          "help": "Average rating from 0 to 5."},
+    "spend_to_credit_ratio": {"label": "Spend-to-credit ratio", "min_value": 0.0,
+                               "step": 0.01, "format": "%.4f",
+                               "help": "Spend divided by credit limit plus one."},
+    "region": {"label": "Customer region", "help": "Choose the customer's profile region."},
+}
+
+DEFAULTS = {**PERSONAL_DEFAULTS, **FEATURE_DEFAULTS}
+FEATURE_KEYS = list(FEATURE_DEFAULTS)
 
 if "form" not in st.session_state:
     st.session_state.form = dict(DEFAULTS)
-if "step" not in st.session_state:
-    st.session_state.step = 0
 
 
 def reset_form():
     """Button callback: start a fresh customer."""
     st.session_state.form = dict(DEFAULTS)
-    st.session_state.step = 0
     for key in list(st.session_state.keys()):
-        if key.startswith("w_"):
+        if key.startswith("prediction_"):
             del st.session_state[key]
-
-
-def jump_to(step_number):
-    """Step button callback: save the current inputs, then open that step."""
-    for key in DEFAULTS:
-        widget_key = f"w_{key}"
-        if widget_key in st.session_state:
-            st.session_state.form[key] = st.session_state[widget_key]
-    st.session_state.step = step_number
+    st.session_state.latest_prediction = None
 
 
 def go_to(page_name):
@@ -432,6 +448,132 @@ if api_connected:
     except requests.RequestException:
         pass
 
+MODEL_FEATURES = api_info.get("selected_input_columns", FEATURE_KEYS)
+MODEL_CATEGORICAL_FEATURES = api_info.get("categorical_columns", ["region"])
+
+
+@st.cache_data
+def load_region_options():
+    """Load known customer regions for the categorical input control."""
+    region_file = Path(__file__).resolve().parent / "data" / "processed" / "customers.csv"
+    try:
+        regions = pd.read_csv(region_file, usecols=["region"], dtype="string")["region"]
+        values = sorted(regions.dropna().unique().tolist())
+        if values:
+            return values
+    except (OSError, ValueError, pd.errors.ParserError):
+        pass
+    return [f"region_{number}" for number in range(100)]
+
+
+REGION_OPTIONS = load_region_options()
+PREDICTION_STORE_PATH = (
+    Path(__file__).resolve().parent
+    / "data"
+    / "submissions"
+    / "prediction_inputs.json"
+)
+
+
+def load_prediction_records():
+    """Read persisted prediction details from the local JSON store."""
+    if not PREDICTION_STORE_PATH.exists():
+        return []
+    with PREDICTION_STORE_PATH.open("r", encoding="utf-8") as json_file:
+        store = json.load(json_file)
+    if not isinstance(store, dict) or not isinstance(store.get("records"), list):
+        raise ValueError("The prediction history JSON has an invalid structure.")
+    return store["records"]
+
+
+def save_prediction_record(record):
+    """Append one model prediction to the local JSON store atomically."""
+    records = load_prediction_records()
+    records.append(record)
+    write_prediction_records(records)
+
+
+def write_prediction_records(records):
+    """Write the complete prediction history to JSON using an atomic replace."""
+    PREDICTION_STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = PREDICTION_STORE_PATH.with_suffix(".json.tmp")
+    with temporary_path.open("w", encoding="utf-8") as json_file:
+        json.dump(
+            {"schema_version": 1, "records": records},
+            json_file,
+            indent=2,
+            ensure_ascii=False,
+        )
+    temporary_path.replace(PREDICTION_STORE_PATH)
+
+
+def delete_prediction_records(record_ids):
+    """Remove selected prediction records and return the number removed."""
+    selected_ids = set(record_ids)
+    records = load_prediction_records()
+    remaining_records = [
+        record for record in records if record.get("record_id") not in selected_ids
+    ]
+    removed_count = len(records) - len(remaining_records)
+    if removed_count:
+        write_prediction_records(remaining_records)
+    return removed_count
+
+
+HISTORY_COLUMN_LABELS = {
+    "record_id": "Prediction ID",
+    "customer_id": "Customer ID",
+    "customer_name": "Customer Name",
+    "customer_phone": "Phone Number",
+    "timestamp": "Predicted At",
+    "model_name": "Model",
+    "customer_status": "Outcome",
+    "predicted_label": "Model Class",
+    "probability_class_1": "Churn Probability",
+    "threshold": "Decision Threshold",
+    "age": "Age",
+    "loyalty_score": "Loyalty Score",
+    "discount_usage_rate": "Discount Usage Rate",
+    "email_open_rate": "Email Open Rate",
+    "avg_cart_additions": "Average Cart Additions",
+    "avg_review_score": "Average Review Score",
+    "spend_to_credit_ratio": "Spend-to-Credit Ratio",
+    "region": "Region",
+}
+
+
+def history_column_config(columns):
+    """Give stored prediction fields readable labels in Streamlit tables."""
+    config = {
+        column: HISTORY_COLUMN_LABELS.get(
+            column, column.replace("_", " ").title()
+        )
+        for column in columns
+    }
+    if "probability_class_1" in columns:
+        config["probability_class_1"] = st.column_config.ProgressColumn(
+            "Churn Probability", min_value=0.0, max_value=100.0, format="%.1f%%"
+        )
+    if "threshold" in columns:
+        config["threshold"] = st.column_config.NumberColumn(
+            "Decision Threshold", format="%.1f%%"
+        )
+    numeric_formats = {
+        "age": "%.0f",
+        "loyalty_score": "%.3f",
+        "discount_usage_rate": "%.3f",
+        "email_open_rate": "%.3f",
+        "avg_cart_additions": "%.2f",
+        "avg_review_score": "%.2f",
+        "spend_to_credit_ratio": "%.4f",
+    }
+    for column, number_format in numeric_formats.items():
+        if column in columns:
+            config[column] = st.column_config.NumberColumn(
+                HISTORY_COLUMN_LABELS[column], format=number_format
+            )
+    return config
+
 
 #=======================
 #       Header
@@ -468,11 +610,207 @@ stats_slot = st.sidebar.empty()
 #       Dashboard Page
 #=======================
 
-if page == "Dashboard":
+if page == "Prediction":
+
+    st.subheader("Make a Prediction")
+    st.caption("Provide only the active model's input features. Each prediction and its inputs are saved to local JSON history.")
+    st.info(
+        "The model uses these values to estimate customer churn. If a value comes from "
+        "store activity, use the value recorded by the store rather than guessing."
+    )
+
+    with st.form("customer_data_intake_form", clear_on_submit=False):
+        st.markdown("#### Customer details")
+        customer_cols = st.columns(2)
+        customer_name = customer_cols[0].text_input(
+            "Customer name *", max_chars=120, key="prediction_customer_name"
+        )
+        customer_phone = customer_cols[1].text_input(
+            "Phone number *", max_chars=40, key="prediction_customer_phone"
+        )
+
+        st.markdown(f"#### Model features ({len(MODEL_FEATURES)})")
+        input_values = {}
+        input_columns = st.columns(2)
+        for index, feature in enumerate(MODEL_FEATURES):
+            control = FEATURE_CONTROLS.get(
+                feature,
+                {"label": feature.replace("_", " ").title(), "min_value": 0.0,
+                 "step": 0.01, "help": "Enter this model input."},
+            )
+            default_value = FEATURE_DEFAULTS.get(feature, 0.0)
+            with input_columns[index % 2]:
+                if feature in MODEL_CATEGORICAL_FEATURES and feature == "region":
+                    region_value = (
+                        default_value if default_value in REGION_OPTIONS else REGION_OPTIONS[0]
+                    )
+                    input_values[feature] = st.selectbox(
+                        control["label"], REGION_OPTIONS,
+                        index=REGION_OPTIONS.index(region_value),
+                        key=f"prediction_feature_{feature}", help=control.get("help"),
+                    )
+                elif feature in MODEL_CATEGORICAL_FEATURES:
+                    input_values[feature] = st.text_input(
+                        control["label"], key=f"prediction_feature_{feature}",
+                        help=control.get("help"),
+                    )
+                elif feature in {
+                    "loyalty_score", "discount_usage_rate", "email_open_rate",
+                    "avg_review_score",
+                }:
+                    input_values[feature] = st.slider(
+                        control["label"], min_value=control["min_value"],
+                        max_value=control["max_value"], value=float(default_value),
+                        step=control["step"], key=f"prediction_feature_{feature}",
+                        help=control.get("help"),
+                    )
+                else:
+                    input_options = {
+                        name: value for name, value in control.items()
+                        if name in {"min_value", "max_value", "step", "format", "help"}
+                    }
+                    input_default = int(default_value) if feature == "age" else float(default_value)
+                    input_values[feature] = st.number_input(
+                        control["label"], value=input_default,
+                        key=f"prediction_feature_{feature}", **input_options,
+                    )
+        submitted = st.form_submit_button(
+            "Get prediction", type="primary", use_container_width=True
+        )
+
+    if submitted:
+        if not customer_name.strip() or not customer_phone.strip():
+            st.error("Enter the customer name and phone number before predicting.")
+        elif not api_connected:
+            st.error("The prediction API is offline. Start the backend, then try again.")
+        else:
+            try:
+                response = requests.post(
+                    f"{API_URL}/predict", json={"features": input_values}, timeout=20
+                )
+                result = response.json()
+                if not response.ok or "prediction" not in result:
+                    st.error(result.get("error", "The model could not score these inputs."))
+                else:
+                    now = datetime.now()
+                    prediction = int(result["prediction"])
+                    customer_id = f"CUST-{uuid4().hex[:12].upper()}"
+                    record = {
+                        "record_id": f"PRED-{uuid4().hex[:12].upper()}",
+                        "customer_id": customer_id,
+                        "customer_name": customer_name.strip(),
+                        "customer_phone": customer_phone.strip(),
+                        "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
+                        "prediction": prediction,
+                        "predicted_label": result["predicted_label"],
+                        "model_name": api_info.get("model", "Retention model"),
+                        "probability_class_1": float(result["probability_class_1"]),
+                        "threshold": float(result["threshold"]),
+                        "customer_status": class_word(prediction),
+                        "saved_to_json": True,
+                        **input_values,
+                    }
+                    try:
+                        save_prediction_record(record)
+                    except (OSError, ValueError, json.JSONDecodeError) as error:
+                        record["saved_to_json"] = False
+                        st.error(f"Prediction succeeded, but could not save its history: {error}")
+                    st.session_state.history.append(record)
+                    st.session_state.latest_prediction = record
+            except (requests.RequestException, ValueError) as error:
+                st.error(f"Could not get a prediction: {error}")
+
+    latest = st.session_state.latest_prediction
+    if latest is not None:
+        st.divider()
+        st.subheader("Result")
+        customer_label = html.escape(latest.get("customer_name", "Customer"))
+        customer_phone = html.escape(latest.get("customer_phone", "Not provided"))
+        customer_id = html.escape(latest.get("customer_id", "Not provided"))
+        st.caption(
+            f"ID: {customer_id}  |  Customer: {customer_label}"
+            f"  |  Phone: {customer_phone}"
+        )
+        if latest.get("saved_to_json", True):
+            st.caption("Prediction saved in Prediction History.")
+        else:
+            st.warning("Prediction succeeded, but it could not be saved to history.")
+
+        prediction = int(latest["prediction"])
+        status = class_word(prediction)
+        color_a, color_b = class_colors(prediction)
+        st.markdown(
+            f'<div class="status-wrap"><div class="status-badge" '
+            f'style="background: linear-gradient(120deg, {color_a}, {color_b});">'
+            f'{html.escape(status)}</div></div>',
+            unsafe_allow_html=True,
+        )
+
+        if prediction == ATTENTION_CLASS:
+            st.markdown(
+                '<div class="alert-card alert-bad">'
+                '<div class="alert-title">Needs attention</div>'
+                '<p class="alert-text">This customer may leave. '
+                'Consider a follow-up or an offer.</p></div>',
+                unsafe_allow_html=True,
+            )
+        else:
+            st.markdown(
+                '<div class="alert-card alert-good">'
+                '<div class="alert-title">No action needed</div>'
+                '<p class="alert-text">This customer looks stable.</p></div>',
+                unsafe_allow_html=True,
+            )
+
+        probability = float(latest["probability_class_1"])
+        threshold = float(latest["threshold"])
+        result_cols = st.columns(3)
+        result_cols[0].metric("Customer Status", status)
+        result_cols[1].metric("Class 1 Probability", f"{probability:.2%}")
+        result_cols[2].metric("Threshold", f"{threshold:.2%}")
+        st.progress(min(max(probability, 0.0), 1.0))
+        st.caption("Class 1 probability is the estimated churn probability.")
+
+        download_cols = st.columns(3)
+        download_cols[0].download_button(
+            "Download JSON",
+            data=json.dumps(latest, indent=2, default=str),
+            file_name="prediction_result.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+        download_cols[1].download_button(
+            "Download CSV",
+            data=pd.DataFrame([latest]).to_csv(index=False),
+            file_name="prediction_result.csv",
+            mime="text/csv",
+            use_container_width=True,
+        )
+        download_cols[2].button(
+            "New Customer", on_click=reset_form, use_container_width=True
+        )
+
+elif page == "Dashboard":
 
     st.subheader("Overview")
 
-    history_df = pd.DataFrame(st.session_state.history)
+    try:
+        history_df = pd.DataFrame(load_prediction_records())
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        history_df = pd.DataFrame()
+        st.error(f"Could not read saved prediction history: {error}")
+    for column in ["customer_id", "customer_name", "customer_phone"]:
+        if column not in history_df.columns:
+            history_df[column] = "Not provided"
+        else:
+            history_df[column] = history_df[column].fillna("Not provided")
+    if not history_df.empty:
+        if "customer_status" not in history_df.columns:
+            history_df["customer_status"] = history_df["prediction"].map(class_word)
+        else:
+            history_df["customer_status"] = history_df["customer_status"].fillna(
+                history_df["prediction"].map(class_word)
+            )
     total = len(history_df)
 
     if total:
@@ -496,12 +834,12 @@ if page == "Dashboard":
     with left:
         st.markdown(
             '<div class="section-card"><h3>New Prediction</h3>'
-            "<p>Enter customer details.</p></div>",
+            "<p>Enter the active model's input features.</p></div>",
             unsafe_allow_html=True,
         )
         st.button(
             "Open Prediction", use_container_width=True,
-            on_click=go_to, args=("Customer Prediction",),
+            on_click=go_to, args=("Prediction",),
         )
 
     with right:
@@ -520,307 +858,27 @@ if page == "Dashboard":
     if history_df.empty:
         st.info("No predictions yet.")
     else:
-        recent = history_df[
-            ["timestamp", "customer_id", "customer_name", "customer_status",
-             "probability_class_1", "customer_tier", "total_spent"]
-        ].iloc[::-1].head(5)
+        recent_columns = [column for column in [
+            "timestamp", "record_id", "customer_id", "customer_name",
+            "customer_phone", "customer_status",
+            "probability_class_1",
+        ] if column in history_df.columns] + [
+            key for key in MODEL_FEATURES
+            if key in history_df.columns and key not in {
+                "timestamp", "record_id", "customer_id", "customer_name",
+                "customer_phone", "predicted_label", "probability_class_1",
+            }
+        ]
+        recent = history_df[recent_columns].iloc[::-1].head(5)
+        recent = recent.copy()
+        if "probability_class_1" in recent.columns:
+            recent["probability_class_1"] *= 100
 
         st.dataframe(
             recent,
             use_container_width=True,
             hide_index=True,
-            column_config={
-                "probability_class_1": st.column_config.ProgressColumn(
-                    "Class 1 Probability", min_value=0.0, max_value=1.0, format="%.2f"
-                )
-            },
-        )
-
-
-#=======================
-#       Customer Prediction Page
-#=======================
-
-elif page == "Customer Prediction":
-
-    st.subheader("Customer Prediction")
-    st.caption("Fill each step, then generate the prediction on the last one.")
-
-    form = st.session_state.form
-    step = st.session_state.step
-    last_step = len(STEPS) - 1
-
-    # Widgets that save their value into `form`, so nothing is lost between steps.
-    def number(key, label, **options):
-        form[key] = st.number_input(label, value=form[key], key=f"w_{key}", **options)
-
-    def text(key, label, **options):
-        form[key] = st.text_input(label, value=form[key], key=f"w_{key}", **options)
-
-    def choice(key, label, options):
-        form[key] = st.selectbox(
-            label, options, index=options.index(form[key]), key=f"w_{key}"
-        )
-
-    #=======================
-    #       Step Tracker
-    #=======================
-
-    with st.container(key="tracker"):
-        step_cols = st.columns(len(STEPS))
-        for index, name in enumerate(STEPS):
-            step_cols[index].button(
-                f"{index + 1}. {name}",
-                key=f"jump_{index}",
-                type="primary" if index == step else "secondary",
-                use_container_width=True,
-                on_click=jump_to,
-                args=(index,),
-            )
-
-    st.caption(f"Step {step + 1} of {len(STEPS)}. Click any step to jump to it.")
-
-    #=======================
-    #       Current Step Inputs
-    #=======================
-
-    with st.container(border=True):
-
-        st.markdown(f"#### {STEPS[step]}")
-
-        if step == 0:
-            st.caption("For your records only. Not used in the prediction.")
-            c1, c2 = st.columns(2)
-            with c1:
-                text("customer_id", "Customer ID", placeholder="e.g. CUST-1001",
-                     help="Leave empty to create one automatically.")
-                text("customer_phone", "Phone Number", placeholder="e.g. 98765 43210")
-            with c2:
-                text("customer_name", "Full Name", placeholder="e.g. Aman Singh")
-                text("customer_email", "Email", placeholder="e.g. name@email.com")
-
-        elif step == 1:
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                number("age", "Age", min_value=18, max_value=100)
-                choice("customer_tier", "Customer Tier",
-                       ["Silver", "Bronze", "Gold", "Platinum"])
-                number("loyalty_score", "Loyalty Score", min_value=0.0, max_value=1.0,
-                       format="%.4f", help="Between 0 and 1.")
-            with c2:
-                number("avg_review_score", "Average Review Score",
-                       min_value=0.0, max_value=5.0, help="Between 0 and 5.")
-                number("credit_limit", "Credit Limit", min_value=0.0)
-                number("signup_month", "Signup Month", min_value=1, max_value=12)
-            with c3:
-                number("customer_tenure_days", "Tenure (Days)", min_value=0)
-                text("country_code", "Country Code")
-                text("region", "Region")
-
-        elif step == 2:
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                number("total_sessions", "Total Sessions", min_value=0)
-                number("avg_session_duration", "Avg. Session Duration", min_value=0.0)
-                number("total_pages_viewed", "Total Pages Viewed", min_value=0)
-            with c2:
-                number("avg_pages_viewed", "Avg. Pages Viewed", min_value=0.0)
-                number("total_cart_additions", "Total Cart Additions", min_value=0)
-                number("avg_cart_additions", "Avg. Cart Additions", min_value=0.0)
-            with c3:
-                number("bounce_rate", "Bounce Rate", min_value=0.0, max_value=1.0,
-                       help="Between 0 and 1.")
-                number("recency_session_days", "Days Since Last Session", min_value=0)
-
-        elif step == 3:
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                number("total_transactions", "Total Transactions", min_value=0)
-                number("total_spent", "Total Spent", min_value=0.0)
-                number("avg_order_value", "Avg. Order Value", min_value=0.0)
-                number("max_order_value", "Max. Order Value", min_value=0.0)
-            with c2:
-                number("total_items", "Total Items", min_value=0)
-                number("avg_items_per_order", "Avg. Items Per Order", min_value=0.0)
-                number("discount_trans_ratio", "Discounted Order Ratio",
-                       min_value=0.0, max_value=1.0, help="Between 0 and 1.")
-                number("recency_trans_days", "Days Since Last Order", min_value=0)
-            with c3:
-                number("cart_to_order_ratio", "Cart-to-Order Ratio",
-                       min_value=0.0, format="%.4f")
-                number("spend_per_session", "Spend Per Session", min_value=0.0)
-                number("spend_to_credit_ratio", "Spend-to-Credit Ratio",
-                       min_value=0.0, format="%.4f")
-
-        elif step == 4:
-            c1, c2 = st.columns(2)
-            with c1:
-                number("email_open_rate", "Email Open Rate", min_value=0.0,
-                       max_value=1.0, help="Between 0 and 1.")
-                number("discount_usage_rate", "Discount Usage Rate", min_value=0.0,
-                       max_value=1.0, help="Between 0 and 1.")
-                number("avg_campaign_budget", "Avg. Campaign Budget", min_value=0.0)
-            with c2:
-                number("total_campaign_budget", "Total Campaign Budget", min_value=0.0)
-                text("primary_campaign_type", "Primary Campaign Type")
-
-        else:
-            c1, c2, c3 = st.columns(3)
-            with c1:
-                text("geo_ip_region", "Geographic Region")
-                text("region_tier", "Region Tier")
-            with c2:
-                number("average_income", "Avg. Regional Income", min_value=0.0)
-                number("urban_ratio", "Urban Ratio", min_value=0.0, max_value=1.0,
-                       help="Between 0 and 1.")
-            with c3:
-                number("internet_penetration", "Internet Penetration",
-                       min_value=0.0, max_value=1.0, help="Between 0 and 1.")
-
-    #=======================
-    #       Back / Next / Generate
-    #=======================
-
-    submitted = False
-    back_col, next_col = st.columns(2)
-
-    if step > 0:
-        if back_col.button(f"← Back: {STEPS[step - 1]}", use_container_width=True):
-            st.session_state.step -= 1
-            st.rerun()
-
-    if step < last_step:
-        if next_col.button(
-            f"Next: {STEPS[step + 1]} →", type="primary", use_container_width=True
-        ):
-            st.session_state.step += 1
-            st.rerun()
-    else:
-        _, middle, _ = st.columns([1, 2, 1])
-        submitted = middle.button(
-            "Generate Prediction", type="primary", use_container_width=True
-        )
-
-    #=======================
-    #       Prepare Features
-    #=======================
-
-    features = {key: form[key] for key in FEATURE_KEYS}
-
-    #=======================
-    #       Prediction Request
-    #=======================
-
-    if submitted:
-        if not api_connected:
-            st.error("The backend is offline.")
-        else:
-            try:
-                with st.spinner("Generating prediction..."):
-                    api_response = requests.post(
-                        f"{API_URL}/predict",
-                        json={"features": features},
-                        timeout=15,
-                    )
-
-                if api_response.ok:
-                    result = api_response.json()
-
-                    if "prediction" not in result:
-                        st.error("The API response has no prediction.")
-                        st.json(result)
-                    else:
-                        record = {
-                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                            "prediction": int(result["prediction"]),
-                            "predicted_label": result.get(
-                                "predicted_label", f"Class {result['prediction']}"
-                            ),
-                            "probability_class_1": float(result["probability_class_1"]),
-                            "threshold": float(result["threshold"]),
-                            "customer_status": class_word(int(result["prediction"])),
-                            "customer_id": form["customer_id"].strip()
-                            or f"CUST-{datetime.now():%y%m%d%H%M%S}",
-                            "customer_name": form["customer_name"].strip() or "Not provided",
-                            "customer_phone": form["customer_phone"].strip() or "Not provided",
-                            "customer_email": form["customer_email"].strip() or "Not provided",
-                            **features,
-                        }
-                        st.session_state.history.append(record)
-                        st.session_state.latest_prediction = record
-                        st.markdown(
-                            '<div class="success-wrap"><div class="success-banner">'
-                            "Prediction generated successfully</div></div>",
-                            unsafe_allow_html=True,
-                        )
-                else:
-                    st.error(f"API error: {api_response.status_code}")
-                    st.code(api_response.text)
-
-            except requests.RequestException as error:
-                st.error(f"Could not reach the API: {error}")
-
-    #=======================
-    #       Prediction Result
-    #=======================
-
-    latest = st.session_state.latest_prediction
-
-    if latest is not None:
-        st.divider()
-        st.subheader("Result")
-        st.caption(
-            f"ID: {latest['customer_id']}  |  Customer: {latest['customer_name']}"
-            f"  |  Phone: {latest['customer_phone']}"
-        )
-
-        color_a, color_b = class_colors(latest["prediction"])
-        st.markdown(
-            f'<div class="status-wrap"><div class="status-badge" '
-            f'style="background: linear-gradient(120deg, {color_a}, {color_b});">'
-            f'{latest["customer_status"]}</div></div>',
-            unsafe_allow_html=True,
-        )
-
-        if latest["prediction"] == ATTENTION_CLASS:
-            st.markdown(
-                '<div class="alert-card alert-bad">'
-                '<div class="alert-title">Needs attention</div>'
-                '<p class="alert-text">This customer may leave. '
-                "Consider a follow-up or an offer.</p></div>",
-                unsafe_allow_html=True,
-            )
-        else:
-            st.markdown(
-                '<div class="alert-card alert-good">'
-                '<div class="alert-title">No action needed</div>'
-                '<p class="alert-text">This customer looks stable.</p></div>',
-                unsafe_allow_html=True,
-            )
-
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Customer Status", latest["customer_status"])
-        c2.metric("Class 1 Probability", f"{latest['probability_class_1']:.2%}")
-        c3.metric("Threshold", f"{latest['threshold']:.2%}")
-
-        st.progress(min(max(latest["probability_class_1"], 0.0), 1.0))
-        st.caption(f"Status is shown as {class_word(0)} (Class 0) or {class_word(1)} (Class 1).")
-
-        d1, d2, d3 = st.columns(3)
-        d3.button("New Customer", on_click=reset_form, use_container_width=True)
-        d1.download_button(
-            "Download JSON",
-            data=json.dumps(latest, indent=2, default=str),
-            file_name="prediction_result.json",
-            mime="application/json",
-            use_container_width=True,
-        )
-        d2.download_button(
-            "Download CSV",
-            data=pd.DataFrame([latest]).to_csv(index=False),
-            file_name="prediction_result.csv",
-            mime="text/csv",
-            use_container_width=True,
+            column_config=history_column_config(recent.columns),
         )
 
 
@@ -831,49 +889,174 @@ elif page == "Customer Prediction":
 elif page == "Prediction History":
 
     st.subheader("Prediction History")
-    st.caption("Saved for this session only.")
+    st.caption(f"Saved prediction inputs and results: {PREDICTION_STORE_PATH}")
+    if st.session_state.pop("clear_history_selection", False):
+        st.session_state.history_records_to_remove = []
 
-    if not st.session_state.history:
-        st.info("No predictions yet.")
+    try:
+        saved_records = load_prediction_records()
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        saved_records = []
+        st.error(f"Could not read saved predictions: {error}")
+
+    if not saved_records:
+        st.info("No saved predictions yet. Make one from the Prediction page.")
     else:
-        history_df = pd.DataFrame(st.session_state.history)
+        history_df = pd.DataFrame(saved_records)
+        for column in ["customer_id", "customer_name", "customer_phone"]:
+            if column not in history_df.columns:
+                history_df[column] = "Not provided"
+            else:
+                history_df[column] = history_df[column].fillna("Not provided")
+        if "customer_status" not in history_df.columns:
+            history_df["customer_status"] = history_df["prediction"].map(class_word)
+        else:
+            history_df["customer_status"] = history_df["customer_status"].fillna(
+                history_df["prediction"].map(class_word)
+            )
+        filter_cols = st.columns(2)
+        class_filter = filter_cols[0].selectbox(
+            "Filter by predicted class", ["All classes", "Class 0", "Class 1"]
+        )
+        record_search = filter_cols[1].text_input("Search customer or record ID")
 
-        c1, c2, c3 = st.columns(3)
-        c1.metric("Total", len(history_df))
-        c2.metric(class_word(1), int((history_df["prediction"] == 1).sum()))
-        c3.metric(class_word(0), int((history_df["prediction"] == 0).sum()))
+        filtered_history = history_df.copy()
+        if class_filter != "All classes":
+            selected_class = int(class_filter[-1])
+            filtered_history = filtered_history[
+                filtered_history["prediction"] == selected_class
+            ]
+        if record_search.strip():
+            search_term = record_search.strip()
+            record_ids = filtered_history.get(
+                "record_id", pd.Series("", index=filtered_history.index)
+            ).astype("string")
+            customer_ids = filtered_history.get(
+                "customer_id", pd.Series("", index=filtered_history.index)
+            ).astype("string")
+            customer_names = filtered_history.get(
+                "customer_name", pd.Series("", index=filtered_history.index)
+            ).astype("string")
+            search_matches = (
+                record_ids.str.contains(search_term, case=False, na=False)
+                | customer_ids.str.contains(search_term, case=False, na=False)
+                | customer_names.str.contains(search_term, case=False, na=False)
+            )
+            filtered_history = filtered_history[search_matches]
 
-        st.dataframe(
-            history_df[
-                ["timestamp", "customer_id", "customer_name", "customer_phone", "customer_status",
-                 "probability_class_1", "threshold", "customer_tier", "total_spent"]
-            ].iloc[::-1],
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "probability_class_1": st.column_config.ProgressColumn(
-                    "Class 1 Probability", min_value=0.0, max_value=1.0, format="%.2f"
+        metric_cols = st.columns(3)
+        metric_cols[0].metric("Saved predictions", len(history_df))
+        metric_cols[1].metric("Showing", len(filtered_history))
+        metric_cols[2].metric(
+            class_word(1), int((history_df["prediction"] == 1).sum())
+        )
+
+        if filtered_history.empty:
+            st.info("No saved predictions match those filters.")
+        else:
+            display_columns = [
+                column for column in [
+                    "record_id", "customer_id", "customer_name", "customer_phone",
+                    "timestamp", "model_name", "customer_status",
+                    "probability_class_1", "threshold",
+                ] if column in filtered_history.columns
+            ] + [
+                column for column in MODEL_FEATURES
+                if column in filtered_history.columns
+                and column not in {
+                    "record_id", "customer_id", "customer_name", "customer_phone",
+                    "timestamp", "model_name", "customer_status",
+                    "probability_class_1", "threshold",
+                }
+            ]
+            display_history = filtered_history[display_columns].iloc[::-1].copy()
+            display_history["probability_class_1"] *= 100
+            if "threshold" in display_history.columns:
+                display_history["threshold"] *= 100
+            st.dataframe(
+                display_history,
+                use_container_width=True,
+                hide_index=True,
+                column_config=history_column_config(display_history.columns),
+            )
+
+            download_cols = st.columns(2)
+            download_cols[0].download_button(
+                "Download filtered CSV",
+                data=filtered_history.to_csv(index=False),
+                file_name="prediction_history.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+            download_cols[1].download_button(
+                "Download filtered JSON",
+                data=json.dumps(
+                    filtered_history.to_dict(orient="records"), indent=2, default=str
+                ),
+                file_name="prediction_history.json",
+                mime="application/json",
+                use_container_width=True,
+            )
+
+            st.markdown("#### Class 1 Probability Trend")
+            st.line_chart(
+                filtered_history["probability_class_1"].reset_index(drop=True)
+            )
+
+            st.divider()
+            st.markdown("#### Remove saved predictions")
+            st.caption("Choose one or more records from the current filter results.")
+            record_labels = {
+                record["record_id"]: (
+                    f"{record['record_id']} · "
+                    f"{record.get('customer_name', 'Not provided')} · "
+                    f"{record.get('customer_status', class_word(record['prediction']))}"
                 )
-            },
-        )
+                for record in filtered_history.to_dict(orient="records")
+                if record.get("record_id")
+            }
+            selected_record_ids = st.multiselect(
+                "Select records to remove",
+                options=list(record_labels),
+                format_func=lambda record_id: record_labels[record_id],
+                key="history_records_to_remove",
+            )
+            if st.button(
+                "Remove selected records",
+                disabled=not selected_record_ids,
+                key="request_history_delete",
+            ):
+                st.session_state.pending_delete_ids = selected_record_ids
 
-        d1, d2 = st.columns(2)
-        d1.download_button(
-            "Download History CSV",
-            data=history_df.to_csv(index=False),
-            file_name="prediction_history.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-        if d2.button("Clear History", use_container_width=True):
-            st.session_state.history = []
-            st.session_state.latest_prediction = None
-            st.rerun()
-
-        st.markdown("#### Probability Trend")
-        trend = history_df["probability_class_1"].reset_index(drop=True)
-        trend.index = trend.index + 1
-        st.line_chart(trend)
+            pending_delete_ids = st.session_state.get("pending_delete_ids", [])
+            if pending_delete_ids:
+                st.warning(
+                    f"This will permanently remove {len(pending_delete_ids)} "
+                    "prediction record(s) from the JSON history."
+                )
+                confirm_col, cancel_col = st.columns(2)
+                if confirm_col.button(
+                    "Confirm permanent removal", type="primary", key="confirm_history_delete"
+                ):
+                    try:
+                        removed_count = delete_prediction_records(pending_delete_ids)
+                        removed_set = set(pending_delete_ids)
+                        st.session_state.history = [
+                            record for record in st.session_state.history
+                            if record.get("record_id") not in removed_set
+                        ]
+                        latest_record = st.session_state.latest_prediction
+                        if latest_record and latest_record.get("record_id") in removed_set:
+                            st.session_state.latest_prediction = None
+                        st.session_state.pending_delete_ids = []
+                        st.session_state.clear_history_selection = True
+                        st.success(f"Removed {removed_count} prediction record(s).")
+                        st.rerun()
+                    except (OSError, ValueError, json.JSONDecodeError) as error:
+                        st.error(f"Could not remove the selected records: {error}")
+                if cancel_col.button("Cancel", key="cancel_history_delete"):
+                    st.session_state.pending_delete_ids = []
+                    st.rerun()
 
 
 #=======================
@@ -892,7 +1075,7 @@ elif page == "Model Insights":
         threshold = api_info.get("threshold")
 
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Model", str(api_info.get("model_type", "N/A")))
+        c1.metric("Model", str(api_info.get("model", "N/A")))
         c2.metric(
             "Threshold",
             f"{float(threshold):.2%}" if isinstance(threshold, (int, float)) else "N/A",
@@ -902,6 +1085,10 @@ elif page == "Model Insights":
             "Categorical Features",
             str(api_info.get("categorical_feature_count", "N/A")),
         )
+
+        st.markdown("#### Active model inputs")
+        st.caption("These are the only customer attributes sent to the prediction API.")
+        st.write(api_info.get("selected_input_columns", MODEL_FEATURES))
 
         with st.expander("Full model details"):
             st.json(api_info)

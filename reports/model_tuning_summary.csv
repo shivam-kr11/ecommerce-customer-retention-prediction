@@ -1,0 +1,8 @@
+Model,CV Average Precision,Best Parameters
+Gradient Boosting,0.5882395956695164,"{'learning_rate': 0.08, 'max_depth': 1, 'n_estimators': 150}"
+AdaBoost,0.5877953803676889,"{'learning_rate': 0.1, 'n_estimators': 200}"
+XGBoost,0.2665514150070515,"{'colsample_bytree': 0.8, 'learning_rate': 0.05, 'max_depth': 3, 'n_estimators': 80, 'scale_pos_weight': np.float64(3.925208022702131), 'subsample': 0.8}"
+Logistic Regression,0.2558019780847412,{'C': 10.0}
+Decision Tree,0.2534935930241955,"{'max_depth': 4, 'min_samples_leaf': 20}"
+K-Nearest Neighbors,0.21923445121221688,"{'n_neighbors': 11, 'weights': 'distance'}"
+Naive Bayes,0.2005070472693019,{'var_smoothing': 1e-11}

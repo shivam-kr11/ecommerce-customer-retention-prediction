@@ -1,526 +1,356 @@
-#=======================
-#       Import Libraries
-#=======================
+# ============================================================================
+# E-COMMERCE CUSTOMER RETENTION AND CHURN PREDICTION
+#
+# WORKFLOW:
+# 1. Load and inspect each dataset.
+# 2. Clean each dataset one at a time.
+# 3. Create customer-level features and combine the datasets.
+# 4. Split customers into training and validation groups.
+# 5. Encode, scale, train, compare, and save the models.
+# ============================================================================
 
-import os
-import pandas as pd
-import numpy as np
+#================ IMPORTING LIBRARIES ================
+from pathlib import Path
+
+import joblib
 import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 import seaborn as sns
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
 from sklearn.linear_model import LogisticRegression
-from sklearn.neighbors import KNeighborsClassifier
+from sklearn.ensemble import AdaBoostClassifier, GradientBoostingClassifier
+from sklearn.metrics import (
+    accuracy_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    roc_curve,
+)
+from sklearn.model_selection import GridSearchCV, StratifiedKFold, train_test_split
 from sklearn.naive_bayes import GaussianNB
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.tree import DecisionTreeClassifier
-from sklearn.metrics import (classification_report, confusion_matrix,roc_auc_score, accuracy_score,precision_score,recall_score,f1_score,roc_curve)
+from sklearn.utils.class_weight import compute_sample_weight
+from xgboost import XGBClassifier
 
 
-#=======================
-#       Configuration
-#=======================
-
-path = "data/raw"
-
-
-#=======================
-#       Read File Names
-#=======================
-
-files = sorted(os.listdir(path))
-
-print("\nAvailable Files in Raw Directory:")
-print(files)
+#================ CONFIGURATION ================
+BASE_DIR = Path(__file__).resolve().parent
+DATA_PATH = BASE_DIR / "data" / "raw"
+PROCESSED_PATH = BASE_DIR / "data" / "processed"
+FIGURES_PATH = BASE_DIR / "reports" / "figures"
+MODEL_PATH = BASE_DIR / "models" / "retention_model.pkl"
+RANDOM_STATE = 42
+VALIDATION_SIZE = 0.20
+TOP_INPUT_FEATURE_COUNT = 8
 
 
-#=======================
-#       Inspect All Raw CSV Files
-#=======================
-
-for file in files:
-    if file.endswith(".csv"):
-        file_path = os.path.join(path, file)
-        data = pd.read_csv(file_path)
-
-        print("\n" + "=" * 50)
-        print("File Name:", file)
-        print("=" * 50)
-        print("Shape (Rows, Columns):", data.shape)
-        print("\nColumns List:")
-        print(data.columns.tolist())
-        print("\nData Types:")
-        print(data.dtypes)
-        print("\nMissing Values Count:")
-        missing_counts = data.isnull().sum()
-        print(missing_counts[missing_counts > 0] if (missing_counts > 0).any() else "No missing values")
-        print("\nDuplicate Rows Count:", data.duplicated().sum())
-        print("\nFirst 3 Rows:")
-        print(data.head(3))
+#================ HELPER: INSPECT A DATASET ================
+def inspect_dataset(data, dataset_name):
+    """Print the same basic checks for each raw dataset."""
+    print("\n" + "=" * 60)
+    print("DATASET:", dataset_name)
+    print("=" * 60)
+    print("Shape:", data.shape)
+    print("Columns:", data.columns.tolist())
+    print("Data types:")
+    print(data.dtypes)
+    print("Missing values:")
+    print(data.isnull().sum())
+    print("Duplicate rows:", data.duplicated().sum())
+    print("First 3 rows:")
+    print(data.head(3))
 
 
-#=======================
-#       Inspect Target Distribution (train.csv)
-#=======================
+#================ HELPER: CLEAN CURRENCY VALUES ================
+def clean_currency(data, column):
+    """Remove currency symbols and commas, then convert the column to numbers."""
+    values = data[column].astype("string")
+    values = values.str.replace("$", "", regex=False)
+    values = values.str.replace(",", "", regex=False)
+    data[column] = pd.to_numeric(values, errors="coerce")
+    return data
 
-train_data = pd.read_csv(os.path.join(path, "train.csv"))
 
-print("\n" + "=" * 50)
-print("Target Variable Inspection (train.csv)")
-print("=" * 50)
-print("Target Class Counts:")
+#================ HELPER: CLEAN DATE VALUES ================
+def clean_date(data, column):
+    """Parse dates written as day-month-year."""
+    data[column] = pd.to_datetime(data[column], dayfirst=True, errors="coerce")
+    return data
+
+
+#================ HELPER: VERIFY A CLEANED DATASET ================
+def verify_clean_dataset(data, dataset_name):
+    """Show the final missing-value and duplicate checks for one table."""
+    print("\nFinal check:", dataset_name)
+    print("Shape:", data.shape)
+    print("Missing values:", data.isnull().sum().sum())
+    print("Duplicate rows:", data.duplicated().sum())
+
+
+#================ HELPER: SAVE A GRAPH ================
+def save_graph(file_name):
+    """Save the current graph and show it when an interactive display exists."""
+    FIGURES_PATH.mkdir(parents=True, exist_ok=True)
+    graph_path = FIGURES_PATH / file_name
+    plt.tight_layout()
+    plt.savefig(graph_path, dpi=200, bbox_inches="tight")
+    print("Graph saved:", graph_path)
+    if "agg" not in plt.get_backend().lower():
+        plt.show()
+    plt.close()
+
+
+#================ LOADING DATASETS ================
+print("Loading raw datasets...")
+
+customers = pd.read_csv(DATA_PATH / "customers.csv")
+sessions = pd.read_csv(DATA_PATH / "sessions.csv")
+transactions = pd.read_csv(DATA_PATH / "transactions.csv")
+geo_data = pd.read_csv(DATA_PATH / "geo_data.csv")
+marketing = pd.read_csv(DATA_PATH / "marketing_campaigns.csv")
+train_data = pd.read_csv(DATA_PATH / "train.csv")
+test_data = pd.read_csv(DATA_PATH / "test.csv")
+sample_submission = pd.read_csv(DATA_PATH / "sample_submission.csv")
+
+
+#================ OBJECTIVE 1: INSPECT EACH DATASET ================
+inspect_dataset(customers, "customers.csv")
+inspect_dataset(sessions, "sessions.csv")
+inspect_dataset(transactions, "transactions.csv")
+inspect_dataset(geo_data, "geo_data.csv")
+inspect_dataset(marketing, "marketing_campaigns.csv")
+inspect_dataset(train_data, "train.csv")
+inspect_dataset(test_data, "test.csv")
+inspect_dataset(sample_submission, "sample_submission.csv")
+
+print("\nTarget distribution:")
 print(train_data["target"].value_counts())
-print("\nTarget Class Proportions (%):")
+print("Target percentages:")
 print((train_data["target"].value_counts(normalize=True) * 100).round(2))
 
 
-#=======================
-#       Validate Key Identifiers Across Datasets
-#=======================
+#================ OBJECTIVE 2: CLEAN LABEL FILES AND MAKE VALIDATION SPLIT ================
+# This split is created before any source table is imputed or used for feature selection.
+print("\n================ PREPARING TRAIN AND TEST LABELS ================")
+train_data = train_data.drop_duplicates(subset="customer_id").copy()
+test_data = test_data.drop_duplicates(subset="customer_id").copy()
+train_data["target"] = pd.to_numeric(train_data["target"], errors="coerce")
+train_data = train_data.dropna(subset=["customer_id", "target"])
+train_data["target"] = train_data["target"].astype(int)
 
-customers = pd.read_csv(os.path.join(path, "customers.csv"))
-sessions = pd.read_csv(os.path.join(path, "sessions.csv"))
-transactions = pd.read_csv(os.path.join(path, "transactions.csv"))
-test_data = pd.read_csv(os.path.join(path, "test.csv"))
+sample_submission = sample_submission.drop_duplicates(subset="customer_id").copy()
+sample_submission["target"] = pd.to_numeric(
+    sample_submission["target"], errors="coerce"
+)
+sample_submission = sample_submission.dropna(subset=["customer_id", "target"])
+sample_submission["target"] = sample_submission["target"].astype(int)
 
-print("\n" + "=" * 50)
-print("Key Identifier Cross-Table Verification")
-print("=" * 50)
-print("Unique Customers in customers.csv:", customers["customer_id"].nunique())
-print("Unique Customers in train.csv:    ", train_data["customer_id"].nunique())
-print("Unique Customers in test.csv:     ", test_data["customer_id"].nunique())
-print("Unique Customers in sessions.csv: ", sessions["customer_id"].nunique())
-print("Unique Customers in transactions.csv:", transactions["customer_id"].nunique())
+train_customer_ids, validation_customer_ids = train_test_split(
+    train_data["customer_id"],
+    test_size=VALIDATION_SIZE,
+    random_state=RANDOM_STATE,
+    stratify=train_data["target"],
+)
+train_customer_set = set(train_customer_ids)
+validation_customer_set = set(validation_customer_ids)
+print("Training customers:", len(train_customer_set))
+print("Validation customers:", len(validation_customer_set))
+if len(sessions) < 2_000_000:
+    print(
+        "WARNING: sessions.csv has", len(sessions),
+        "rows; the project documentation says 2,000,000.",
+    )
 
-print("\nAre all train customer_ids present in customers.csv?:",
-      train_data["customer_id"].isin(customers["customer_id"]).all())
-print("Are all test customer_ids present in customers.csv?: ",
-      test_data["customer_id"].isin(customers["customer_id"]).all())
+
+#================ OBJECTIVE 2: CLEAN CUSTOMERS DATASET ================
+print("\n================ CLEANING CUSTOMERS DATASET ================")
+customers = customers.drop_duplicates(subset="customer_id").copy()
+customers["age"] = pd.to_numeric(customers["age"], errors="coerce")
+customers = clean_currency(customers, "credit_limit")
+customers = clean_date(customers, "signup_date")
+customers["country_code"] = customers["country_code"].astype("string").str.strip().str.upper()
+for column in ["region", "customer_tier", "referral_code"]:
+    customers[column] = customers[column].astype("string").str.strip()
+
+customer_train_rows = customers["customer_id"].isin(train_customer_set)
+for column in [
+    "age", "credit_limit", "email_open_rate", "loyalty_score",
+    "discount_usage_rate", "avg_review_score",
+]:
+    customers[column] = customers[column].fillna(
+        customers.loc[customer_train_rows, column].median()
+    )
+for column in ["country_code", "region", "customer_tier", "referral_code"]:
+    customers[column] = customers[column].fillna("Unknown")
+verify_clean_dataset(customers, "customers.csv")
 
 
-#=======================
-#       EDA - Target Variable Visualization
-#=======================
+#================ OBJECTIVE 2: CLEAN SESSIONS DATASET ================
+print("\n================ CLEANING SESSIONS DATASET ================")
+sessions = sessions.drop_duplicates(subset="session_id").copy()
+sessions = clean_date(sessions, "session_timestamp")
+session_number_columns = ["session_duration", "pages_viewed", "cart_additions"]
+for column in session_number_columns:
+    sessions[column] = pd.to_numeric(sessions[column], errors="coerce")
+sessions["bounce_flag"] = (
+    sessions["bounce_flag"].astype("string").str.lower().isin(["1", "true", "yes"])
+).astype(int)
+for column in ["traffic_source", "device_type", "geo_ip_region"]:
+    sessions[column] = sessions[column].astype("string").str.strip()
 
-print("\n" + "=" * 50)
-print("EDA: Target Distribution Analysis")
-print("=" * 50)
+session_train_rows = sessions["customer_id"].isin(train_customer_set)
+for column in session_number_columns:
+    sessions[column] = sessions[column].fillna(
+        sessions.loc[session_train_rows, column].median()
+    )
+for column in ["traffic_source", "device_type", "geo_ip_region"]:
+    sessions[column] = sessions[column].fillna("Unknown")
+session_cap = sessions.loc[session_train_rows, "session_duration"].quantile(0.99)
+sessions["session_duration"] = sessions["session_duration"].clip(upper=session_cap)
+verify_clean_dataset(sessions, "sessions.csv")
+
+
+#================ OBJECTIVE 2: CLEAN TRANSACTIONS DATASET ================
+print("\n================ CLEANING TRANSACTIONS DATASET ================")
+transactions = transactions.drop_duplicates(subset="transaction_id").copy()
+transactions = clean_date(transactions, "transaction_timestamp")
+transactions = clean_currency(transactions, "order_value")
+transactions["items_count"] = pd.to_numeric(transactions["items_count"], errors="coerce")
+transactions["discount_applied"] = (
+    transactions["discount_applied"].astype("string").str.lower().isin(["1", "true", "yes"])
+).astype(int)
+for column in ["payment_method", "shipping_speed", "high_value_flag"]:
+    transactions[column] = transactions[column].astype("string").str.strip()
+
+transaction_train_rows = transactions["customer_id"].isin(train_customer_set)
+for column in ["order_value", "items_count"]:
+    transactions[column] = transactions[column].fillna(
+        transactions.loc[transaction_train_rows, column].median()
+    )
+for column in ["payment_method", "shipping_speed", "high_value_flag"]:
+    transactions[column] = transactions[column].fillna("Unknown")
+order_cap = transactions.loc[transaction_train_rows, "order_value"].quantile(0.99)
+transactions["order_value"] = transactions["order_value"].clip(upper=order_cap)
+verify_clean_dataset(transactions, "transactions.csv")
+
+
+#================ OBJECTIVE 2: CLEAN GEO DATASET ================
+print("\n================ CLEANING GEO DATASET ================")
+geo_data = geo_data.drop_duplicates(subset="geo_ip_region").copy()
+for column in ["geo_ip_region", "region_tier"]:
+    geo_data[column] = geo_data[column].astype("string").str.strip()
+for column in ["average_income", "urban_ratio", "internet_penetration"]:
+    geo_data[column] = pd.to_numeric(geo_data[column], errors="coerce")
+    geo_data[column] = geo_data[column].fillna(geo_data[column].median())
+geo_data["region_tier"] = geo_data["region_tier"].fillna("Unknown")
+verify_clean_dataset(geo_data, "geo_data.csv")
+
+
+#================ OBJECTIVE 2: CLEAN MARKETING DATASET ================
+print("\n================ CLEANING MARKETING DATASET ================")
+marketing = marketing.drop_duplicates(subset="campaign_id").copy()
+marketing = clean_currency(marketing, "campaign_budget")
+marketing = clean_date(marketing, "start_date")
+marketing = clean_date(marketing, "end_date")
+for column in ["campaign_type", "region_target"]:
+    marketing[column] = marketing[column].astype("string").str.strip()
+marketing["campaign_budget"] = marketing["campaign_budget"].fillna(
+    marketing["campaign_budget"].median()
+)
+for column in ["campaign_type", "region_target"]:
+    marketing[column] = marketing[column].fillna("Unknown")
+verify_clean_dataset(marketing, "marketing_campaigns.csv")
+
+
+#================ OBJECTIVE 2: VERIFY LABEL AND SUBMISSION DATASETS ================
+print("\n================ VERIFYING LABEL AND SUBMISSION DATASETS ================")
+verify_clean_dataset(train_data, "train.csv")
+verify_clean_dataset(test_data, "test.csv")
+verify_clean_dataset(sample_submission, "sample_submission.csv")
+print("Target distribution:")
+print(train_data["target"].value_counts())
+print("Target percentages:")
+print((train_data["target"].value_counts(normalize=True) * 100).round(2))
 
 plt.figure(figsize=(6, 4))
-sns.countplot(x="target", data=train_data)
-plt.title("Target Distribution (0 = Retained, 1 = Churned)")
-plt.xlabel("Target")
-plt.ylabel("Count")
-plt.tight_layout()
-plt.show()
-
-
-#=======================
-#       EDA - Customer Numerical Features
-#=======================
-
-print("\n" + "=" * 50)
-print("EDA: Customer Numerical Features Summary")
-print("=" * 50)
-
-customer_num_cols = ["loyalty_score", "email_open_rate", "discount_usage_rate", "avg_review_score"]
-print(customers[customer_num_cols].describe())
-
-customers[customer_num_cols].hist(figsize=(10, 8), bins=30)
-plt.suptitle("Customer Numerical Features Distributions")
-plt.tight_layout()
-plt.show()
-
-
-#=======================
-#       EDA - Customer Categorical Features
-#=======================
-
-print("\n" + "=" * 50)
-print("EDA: Customer Categorical Distributions")
-print("=" * 50)
-
-print("\nCountry Code Distribution (Top 10):")
-print(customers["country_code"].value_counts().head(10))
-
-print("\nRegion Distribution (Top 10):")
-print(customers["region"].value_counts().head(10))
-
-print("\nCustomer Tier Distribution:")
-print(customers["customer_tier"].value_counts())
-
-print("\nReferral Code Distribution (Top 10):")
-print(customers["referral_code"].value_counts().head(10))
-
-
-#=======================
-#       EDA - Session Engagement Features
-#=======================
-
-print("\n" + "=" * 50)
-print("EDA: Session Engagement Summary")
-print("=" * 50)
-
-session_num_cols = ["session_duration", "pages_viewed", "cart_additions"]
-print(sessions[session_num_cols].describe())
-
-print("\nTraffic Source Distribution:")
-print(sessions["traffic_source"].value_counts())
-
-print("\nDevice Type Distribution:")
-print(sessions["device_type"].value_counts())
-
-print("\nBounce Flag Distribution:")
-print(sessions["bounce_flag"].value_counts())
-
-sessions[session_num_cols].hist(figsize=(10, 6), bins=30)
-plt.suptitle("Session Engagement Metrics Distributions")
-plt.tight_layout()
-plt.show()
-
-
-#=======================
-#       EDA - Transaction Patterns
-#=======================
-
-print("\n" + "=" * 50)
-print("EDA: Transaction Behavior Summary")
-print("=" * 50)
-
-# Parsing order_value text format for exploratory numerical analysis
-trans_clean_value = (
-    transactions["order_value"]
-    .str.replace("$", "", regex=False)
-    .str.replace(",", "", regex=False)
-    .astype(float)
-)
-
-print("\nCleaned Order Value Summary:")
-print(trans_clean_value.describe())
-
-print("\nItems Count Summary:")
-print(transactions["items_count"].describe())
-
-print("\nPayment Method Distribution:")
-print(transactions["payment_method"].value_counts())
-
-print("\nDiscount Applied Distribution:")
-print(transactions["discount_applied"].value_counts())
-
-print("\nShipping Speed Distribution:")
-print(transactions["shipping_speed"].value_counts())
-
-print("\nHigh Value Flag Distribution:")
-print(transactions["high_value_flag"].value_counts())
-
-plt.figure(figsize=(10, 4))
-plt.subplot(1, 2, 1)
-sns.boxplot(y=trans_clean_value)
-plt.title("Order Value Boxplot")
-plt.ylabel("Order Value ($)")
-
-plt.subplot(1, 2, 2)
-sns.boxplot(y=transactions["items_count"])
-plt.title("Items Count Boxplot")
-plt.ylabel("Items Count")
-plt.tight_layout()
-plt.show()
-
-
-#=======================
-#       EDA - Geographic and Marketing Signals
-#=======================
-
-geo_data = pd.read_csv(os.path.join(path, "geo_data.csv"))
-marketing = pd.read_csv(os.path.join(path, "marketing_campaigns.csv"))
-
-print("\n" + "=" * 50)
-print("EDA: Geographic and Marketing Summary")
-print("=" * 50)
-
-print("\nGeographical Metrics Summary:")
-print(geo_data.describe())
-
-print("\nRegion Tier Distribution:")
-print(geo_data["region_tier"].value_counts())
-
-print("\nMarketing Campaign Type Distribution:")
-print(marketing["campaign_type"].value_counts())
-
-print("\nTarget Region Distribution (Top 10):")
-print(marketing["region_target"].value_counts().head(10))
-
-geo_data[["average_income", "urban_ratio", "internet_penetration"]].hist(
-    figsize=(10, 6), bins=20
-)
-plt.suptitle("Geographical Metrics Distributions")
-plt.tight_layout()
-plt.show()
-
-
-#=======================
-#       Bivariate Analysis - Features vs Target
-#=======================
-
-print("\n" + "=" * 50)
-print("Bivariate Analysis: Customer Features by Target Class")
-print("=" * 50)
-
-train_merged = pd.merge(customers, train_data, on="customer_id", how="inner")
-
-print("\nAverage Features by Target (0 = Retained, 1 = Churned):")
-print(train_merged.groupby("target")[
-    ["loyalty_score", "discount_usage_rate", "avg_review_score", "email_open_rate"]
-].mean())
-
-print("\nMedian Features by Target (0 = Retained, 1 = Churned):")
-print(train_merged.groupby("target")[
-    ["loyalty_score", "discount_usage_rate", "avg_review_score", "email_open_rate"]
-].median())
-
-# Plotting key features by target class
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-sns.barplot(x="target", y="loyalty_score", data=train_merged, ax=axes[0])
-axes[0].set_title("Loyalty Score by Target")
-axes[0].set_xlabel("Target (0 = Retained, 1 = Churned)")
-axes[0].set_ylabel("Mean Loyalty Score")
-
-sns.barplot(x="target", y="discount_usage_rate", data=train_merged, ax=axes[1])
-axes[1].set_title("Discount Usage Rate by Target")
-axes[1].set_xlabel("Target (0 = Retained, 1 = Churned)")
-axes[1].set_ylabel("Mean Discount Usage Rate")
-plt.tight_layout()
-plt.show()
-
-
-#=======================
-#       Missing-Value Analysis Across Tables
-#=======================
-
-print("\n" + "=" * 50)
-print("Missing-Value Analysis")
-print("=" * 50)
-
-print("\nCustomers Missing Values:")
-cust_missing = customers.isnull().sum()
-cust_missing_pct = (cust_missing / len(customers)) * 100
-missing_cust_df = pd.DataFrame({"Missing Count": cust_missing, "Percentage (%)": cust_missing_pct.round(2)})
-print(missing_cust_df[missing_cust_df["Missing Count"] > 0])
-
-print("\nSessions Missing Values:")
-sess_missing = sessions.isnull().sum()
-sess_missing_pct = (sess_missing / len(sessions)) * 100
-missing_sess_df = pd.DataFrame({"Missing Count": sess_missing, "Percentage (%)": sess_missing_pct.round(2)})
-print(missing_sess_df[missing_sess_df["Missing Count"] > 0])
-
-print("\nTransactions Missing Values:")
-trans_missing = transactions.isnull().sum()
-trans_missing_pct = (trans_missing / len(transactions)) * 100
-missing_trans_df = pd.DataFrame({"Missing Count": trans_missing, "Percentage (%)": trans_missing_pct.round(2)})
-print(missing_trans_df[missing_trans_df["Missing Count"] > 0] if (trans_missing > 0).any() else "No missing values")
-
-
-#=======================
-#       Data Type Cleaning and Standardization
-#=======================
-
-print("\n" + "=" * 50)
-print("Data Type Cleaning & Standardization")
-print("=" * 50)
-
-# Clean Customers age and credit_limit
-customers["age"] = pd.to_numeric(customers["age"], errors="coerce")
-customers["credit_limit"] = (
-    customers["credit_limit"]
-    .astype(str)
-    .str.replace("$", "", regex=False)
-    .str.replace(",", "", regex=False)
-)
-customers["credit_limit"] = pd.to_numeric(customers["credit_limit"], errors="coerce")
-
-# Standardize country_code categories
-customers["country_code"] = customers["country_code"].replace({
-    "usa": "USA",
-    "U.S.": "USA"
-})
-
-# Parse Datetime columns
-customers["signup_date"] = pd.to_datetime(customers["signup_date"], errors="coerce")
-sessions["session_timestamp"] = pd.to_datetime(sessions["session_timestamp"], errors="coerce")
-transactions["transaction_timestamp"] = pd.to_datetime(transactions["transaction_timestamp"], errors="coerce")
-
-# Clean Transactions order_value
-transactions["order_value"] = (
-    transactions["order_value"]
-    .astype(str)
-    .str.replace("$", "", regex=False)
-    .str.replace(",", "", regex=False)
-)
-transactions["order_value"] = pd.to_numeric(transactions["order_value"], errors="coerce")
-
-# Clean Marketing campaign_budget
-marketing["campaign_budget"] = (
-    marketing["campaign_budget"]
-    .astype(str)
-    .str.replace("$", "", regex=False)
-    .str.replace(",", "", regex=False)
-)
-marketing["campaign_budget"] = pd.to_numeric(marketing["campaign_budget"], errors="coerce")
-marketing["start_date"] = pd.to_datetime(marketing["start_date"], errors="coerce")
-marketing["end_date"] = pd.to_datetime(marketing["end_date"], errors="coerce")
-
-print("Cleaned Data Types:")
-print("Customers (age, credit_limit):", customers["age"].dtype, customers["credit_limit"].dtype)
-print("Transactions (order_value):  ", transactions["order_value"].dtype)
-print("Marketing (campaign_budget): ", marketing["campaign_budget"].dtype)
-
-
-#=======================
-#       Outlier Detection via IQR Method
-#=======================
-
-print("\n" + "=" * 50)
-print("Outlier Detection (IQR Method)")
-print("=" * 50)
-
-outlier_targets = [
-    (customers, "customers", ["age", "loyalty_score", "credit_limit"]),
-    (sessions, "sessions", ["session_duration", "pages_viewed", "cart_additions"]),
-    (transactions, "transactions", ["order_value", "items_count"])
-]
-
-for df, df_name, cols in outlier_targets:
-    print(f"\n--- Outlier Analysis for {df_name} ---")
-    for col in cols:
-        series = df[col].dropna()
-        q1 = series.quantile(0.25)
-        q3 = series.quantile(0.75)
-        iqr = q3 - q1
-        lower_bound = q1 - 1.5 * iqr
-        upper_bound = q3 + 1.5 * iqr
-        outlier_count = ((series < lower_bound) | (series > upper_bound)).sum()
-        outlier_pct = (outlier_count / len(series)) * 100
-        print(f"Column: {col:<20} | Q1: {q1:<8.2f} | Q3: {q3:<8.2f} | Lower: {lower_bound:<8.2f} | Upper: {upper_bound:<8.2f} | Outliers: {outlier_count:<7} ({outlier_pct:.2f}%)")
-
-
-#=======================
-#       Train-Validation Customer Partition (Prevent Leakage)
-#=======================
-
-# Establish train/val split strictly at customer level before calculating any imputations or outlier caps
-train_cust_ids, val_cust_ids = train_test_split(
-    train_data["customer_id"],
-    test_size=0.20,
-    random_state=42,
-    stratify=train_data["target"]
-)
-train_cust_set = set(train_cust_ids)
-print(f"\nLeakage Prevention: Partitioned {len(train_cust_ids)} training customers and {len(val_cust_ids)} validation customers.")
-
-
-#=======================
-#       Missing-Value Handling & Imputation (Train Set Only)
-#=======================
-
-print("\n" + "=" * 50)
-print("Missing-Value Imputation (Fit Strictly on Train Data)")
-print("=" * 50)
-
-# Impute email_open_rate with median derived strictly from training customers
-median_email = customers.loc[customers["customer_id"].isin(train_cust_set), "email_open_rate"].median()
-customers["email_open_rate"] = customers["email_open_rate"].fillna(median_email)
-
-# Impute age with median derived strictly from training customers
-median_age = customers.loc[customers["customer_id"].isin(train_cust_set), "age"].median()
-customers["age"] = customers["age"].fillna(median_age)
-
-# Impute credit_limit with median derived strictly from training customers
-median_credit = customers.loc[customers["customer_id"].isin(train_cust_set), "credit_limit"].median()
-customers["credit_limit"] = customers["credit_limit"].fillna(median_credit)
-
-# Impute pages_viewed in sessions with median derived strictly from training customer sessions
-train_sess_mask = sessions["customer_id"].isin(train_cust_set)
-median_pages = sessions.loc[train_sess_mask, "pages_viewed"].median()
-sessions["pages_viewed"] = sessions["pages_viewed"].fillna(median_pages)
-
-print("Remaining Missing Values in Customers:   ", customers[["email_open_rate", "age", "credit_limit"]].isnull().sum().sum())
-print("Remaining Missing Values in Sessions:    ", sessions["pages_viewed"].isnull().sum())
-print("Remaining Missing Values in Transactions:", transactions["order_value"].isnull().sum())
-
-
-#=======================
-#       Outlier Handling (Capping / Winsorization - Train Set Only)
-#=======================
-
-print("\n" + "=" * 50)
-print("Outlier Treatment (Capping Derived Strictly from Train Data)")
-print("=" * 50)
-
-# Cap order_value at 99th percentile derived strictly from training customer transactions
-train_trans_mask = transactions["customer_id"].isin(train_cust_set)
-order_val_p99 = transactions.loc[train_trans_mask, "order_value"].quantile(0.99)
-print(f"Order Value 99th Percentile Cap (Train Only): {order_val_p99:.2f}")
-print("Order Value Max Before Capping: ", transactions["order_value"].max())
-transactions["order_value"] = transactions["order_value"].clip(upper=order_val_p99)
-print("Order Value Max After Capping:  ", transactions["order_value"].max())
-
-# Cap session_duration at 99th percentile derived strictly from training customer sessions
-session_dur_p99 = sessions.loc[train_sess_mask, "session_duration"].quantile(0.99)
-print(f"\nSession Duration 99th Percentile Cap (Train Only): {session_dur_p99:.2f}")
-print("Session Duration Max Before Capping: ", sessions["session_duration"].max())
-sessions["session_duration"] = sessions["session_duration"].clip(upper=session_dur_p99)
-print("Session Duration Max After Capping:  ", sessions["session_duration"].max())
-
-
-#=======================
-#       Feature Engineering - Customer Demographics & Tenure
-#=======================
-
-print("\n" + "=" * 50)
-print("Feature Engineering: Customer Profile & Tenure")
-print("=" * 50)
-
-# Derive tenure relative to the true latest date across ecosystem (eliminating negative tenure & recency)
-reference_date = max(
+sns.countplot(data=train_data, x="target")
+plt.title("Training Target Distribution")
+plt.xlabel("Target (0 = Retained, 1 = Churned)")
+plt.ylabel("Customer Count")
+save_graph("01_target_distribution.png")
+
+
+#================ OBJECTIVE 2: SAVE CLEANED DATASETS ================
+print("\n================ SAVING CLEANED DATASETS ================")
+PROCESSED_PATH.mkdir(parents=True, exist_ok=True)
+cleaned_datasets = {
+    "customers.csv": customers,
+    "sessions.csv": sessions,
+    "transactions.csv": transactions,
+    "geo_data.csv": geo_data,
+    "marketing_campaigns.csv": marketing,
+    "train.csv": train_data,
+    "test.csv": test_data,
+    "sample_submission.csv": sample_submission,
+}
+for file_name, data in cleaned_datasets.items():
+    output_path = PROCESSED_PATH / file_name
+    data.to_csv(output_path, index=False)
+    print("Saved:", output_path)
+
+
+#================ OBJECTIVE 3: PLOT CLEANED FEATURE DISTRIBUTIONS ================
+print("\n================ PLOTTING CLEANED FEATURE DISTRIBUTIONS ================")
+fig, axes = plt.subplots(2, 2, figsize=(12, 8))
+sns.histplot(customers["age"], bins=30, ax=axes[0, 0])
+axes[0, 0].set_title("Customer Age")
+sns.histplot(customers["loyalty_score"], bins=30, ax=axes[0, 1])
+axes[0, 1].set_title("Customer Loyalty Score")
+sns.histplot(sessions["session_duration"].sample(
+    n=min(100000, len(sessions)), random_state=RANDOM_STATE
+), bins=30, ax=axes[1, 0])
+axes[1, 0].set_title("Session Duration (Sample)")
+sns.histplot(transactions["order_value"].sample(
+    n=min(100000, len(transactions)), random_state=RANDOM_STATE
+), bins=30, ax=axes[1, 1])
+axes[1, 1].set_title("Order Value (Sample)")
+save_graph("02_cleaned_feature_distributions.png")
+
+
+#================ OBJECTIVE 4: CREATE CUSTOMER PROFILE FEATURES ================
+print("\n================ CREATING CUSTOMER PROFILE FEATURES ================")
+
+reference_dates = [
     customers["signup_date"].max(),
     sessions["session_timestamp"].max(),
-    transactions["transaction_timestamp"].max()
-)
-print(f"Observation Cutoff Reference Date: {reference_date.date()}")
+    transactions["transaction_timestamp"].max(),
+]
+reference_date = max(date for date in reference_dates if pd.notna(date))
 
 customers["signup_year"] = customers["signup_date"].dt.year
 customers["signup_month"] = customers["signup_date"].dt.month
 customers["customer_tenure_days"] = (reference_date - customers["signup_date"]).dt.days
 
-# Fill any missing tenure/date components with median derived strictly from training customers
-train_cust_mask = customers["customer_id"].isin(train_cust_set)
-customers["customer_tenure_days"] = customers["customer_tenure_days"].fillna(
-    customers.loc[train_cust_mask, "customer_tenure_days"].median()
-)
-customers["signup_year"] = customers["signup_year"].fillna(
-    customers.loc[train_cust_mask, "signup_year"].median()
-)
-customers["signup_month"] = customers["signup_month"].fillna(
-    customers.loc[train_cust_mask, "signup_month"].median()
-)
+for column in ["signup_year", "signup_month", "customer_tenure_days"]:
+    median_value = customers.loc[customer_train_rows, column].median()
+    customers[column] = customers[column].fillna(median_value)
 
-print("Engineered Customer Features (Non-Negative Tenures):")
-print(customers[["customer_id", "signup_year", "signup_month", "customer_tenure_days"]].head(3))
+print("Observation reference date:", reference_date.date())
+print(customers[["customer_id", "signup_year", "customer_tenure_days"]].head(3))
 
 
-#=======================
-#       Feature Engineering - Session Behavioral Aggregations
-#=======================
+#================ OBJECTIVE 4: CREATE SESSION FEATURES ================
+print("\n================ CREATING SESSION FEATURES ================")
 
-print("\n" + "=" * 50)
-print("Feature Engineering: Session Behavior Aggregations")
-print("=" * 50)
-
-# Standardize bounce_flag to numeric indicator
-sessions["is_bounce"] = sessions["bounce_flag"].astype(str).str.lower().isin(["1", "true", "yes"]).astype(int)
-
-# Calculate days since last session relative to reference_date
 sessions["days_since_session"] = (reference_date - sessions["session_timestamp"]).dt.days
-
+sessions["sessions_last_30_days"] = (sessions["days_since_session"] <= 30).astype(int)
+sessions["sessions_last_90_days"] = (sessions["days_since_session"] <= 90).astype(int)
+sessions["sessions_last_180_days"] = (sessions["days_since_session"] <= 180).astype(int)
 session_features = sessions.groupby("customer_id").agg(
     total_sessions=("session_id", "count"),
     avg_session_duration=("session_duration", "mean"),
@@ -528,28 +358,46 @@ session_features = sessions.groupby("customer_id").agg(
     avg_pages_viewed=("pages_viewed", "mean"),
     total_cart_additions=("cart_additions", "sum"),
     avg_cart_additions=("cart_additions", "mean"),
-    bounce_rate=("is_bounce", "mean"),
-    recency_session_days=("days_since_session", "min")
+    bounce_rate=("bounce_flag", "mean"),
+    recency_session_days=("days_since_session", "min"),
+    sessions_last_30_days=("sessions_last_30_days", "sum"),
+    sessions_last_90_days=("sessions_last_90_days", "sum"),
+    sessions_last_180_days=("sessions_last_180_days", "sum"),
 ).reset_index()
 
-print("Session Features Shape:", session_features.shape)
-print(session_features.head(3))
+customer_region_counts = (
+    sessions.groupby(["customer_id", "geo_ip_region"])
+    .size()
+    .reset_index(name="region_visits")
+)
+customer_primary_region = (
+    customer_region_counts.sort_values(
+        ["customer_id", "region_visits"], ascending=[True, False]
+    )
+    .drop_duplicates(subset="customer_id")[["customer_id", "geo_ip_region"]]
+)
+
+print("Session features:", session_features.shape)
 
 
-#=======================
-#       Feature Engineering - Transaction Aggregations
-#=======================
+#================ OBJECTIVE 4: CREATE TRANSACTION FEATURES ================
+print("\n================ CREATING TRANSACTION FEATURES ================")
 
-print("\n" + "=" * 50)
-print("Feature Engineering: Transaction Financial Aggregations")
-print("=" * 50)
-
-# Standardize discount_applied to numeric indicator
-transactions["is_discounted"] = transactions["discount_applied"].astype(str).str.lower().isin(["1", "true", "yes"]).astype(int)
-
-# Calculate days since last transaction
-transactions["days_since_trans"] = (reference_date - transactions["transaction_timestamp"]).dt.days
-
+transactions["days_since_transaction"] = (
+    reference_date - transactions["transaction_timestamp"]
+).dt.days
+transactions["transactions_last_30_days"] = (
+    transactions["days_since_transaction"] <= 30
+).astype(int)
+transactions["transactions_last_90_days"] = (
+    transactions["days_since_transaction"] <= 90
+).astype(int)
+transactions["transactions_last_180_days"] = (
+    transactions["days_since_transaction"] <= 180
+).astype(int)
+transactions["order_value_last_90_days"] = transactions["order_value"].where(
+    transactions["days_since_transaction"] <= 90, 0
+)
 transaction_features = transactions.groupby("customer_id").agg(
     total_transactions=("transaction_id", "count"),
     total_spent=("order_value", "sum"),
@@ -557,771 +405,650 @@ transaction_features = transactions.groupby("customer_id").agg(
     max_order_value=("order_value", "max"),
     total_items=("items_count", "sum"),
     avg_items_per_order=("items_count", "mean"),
-    discount_trans_ratio=("is_discounted", "mean"),
-    recency_trans_days=("days_since_trans", "min")
+    discount_trans_ratio=("discount_applied", "mean"),
+    recency_trans_days=("days_since_transaction", "min"),
+    transactions_last_30_days=("transactions_last_30_days", "sum"),
+    transactions_last_90_days=("transactions_last_90_days", "sum"),
+    transactions_last_180_days=("transactions_last_180_days", "sum"),
+    order_value_last_90_days=("order_value_last_90_days", "sum"),
 ).reset_index()
 
-print("Transaction Features Shape:", transaction_features.shape)
-print(transaction_features.head(3))
+print("Transaction features:", transaction_features.shape)
 
 
-#=======================
-#       Feature Engineering - Primary Customer Region
-#=======================
+#================ OBJECTIVE 4: CREATE MARKETING FEATURES ================
+print("\n================ CREATING MARKETING FEATURES ================")
 
-print("\n" + "=" * 50)
-print("Feature Engineering: Primary Customer Region Mapping")
-print("=" * 50)
-
-# Resolve customer's most visited geographic region from sessions
-customer_region_counts = (
-    sessions.groupby(["customer_id", "geo_ip_region"])
-    .size()
-    .reset_index(name="region_visits")
-)
-
-customer_primary_region = (
-    customer_region_counts.sort_values(["customer_id", "region_visits"], ascending=[True, False])
-    .drop_duplicates(subset="customer_id")
-    [["customer_id", "geo_ip_region"]]
-)
-
-print("Primary Region Mapping Shape:", customer_primary_region.shape)
-print(customer_primary_region.head(3))
-
-
-#=======================
-#       Feature Engineering - Marketing Campaign Integration
-#=======================
-
-print("\n" + "=" * 50)
-print("Feature Engineering: Marketing Campaign Integration")
-print("=" * 50)
-
-# Merge sessions with marketing campaigns on campaign_id
-session_campaigns = pd.merge(
-    sessions[["session_id", "customer_id", "campaign_id"]],
+session_campaigns = sessions[["customer_id", "campaign_id"]].merge(
     marketing[["campaign_id", "campaign_type", "campaign_budget"]],
     on="campaign_id",
-    how="left"
+    how="left",
 )
-
-# Aggregate campaign budget metrics per customer
 campaign_features = session_campaigns.groupby("customer_id").agg(
     avg_campaign_budget=("campaign_budget", "mean"),
-    total_campaign_budget=("campaign_budget", "sum")
+    total_campaign_budget=("campaign_budget", "sum"),
 ).reset_index()
 
-# Determine primary campaign type driving customer engagement
 customer_campaign_type = (
-    session_campaigns.groupby(["customer_id", "campaign_type"])
+    session_campaigns.dropna(subset=["campaign_type"])
+    .groupby(["customer_id", "campaign_type"])
     .size()
-    .reset_index(name="type_visits")
-    .sort_values(["customer_id", "type_visits"], ascending=[True, False])
+    .reset_index(name="campaign_visits")
+    .sort_values(["customer_id", "campaign_visits"], ascending=[True, False])
     .drop_duplicates(subset="customer_id")
     [["customer_id", "campaign_type"]]
     .rename(columns={"campaign_type": "primary_campaign_type"})
 )
 
-print("Campaign Features Shape:     ", campaign_features.shape)
-print("Customer Campaign Type Shape:", customer_campaign_type.shape)
+print("Campaign features:", campaign_features.shape)
 
 
-#=======================
-#       Data Integration - Unified Customer Master Feature Matrix
-#=======================
+#================ OBJECTIVE 4: COMBINE DATASETS ================
+print("\n================ COMBINING CUSTOMER DATASETS ================")
 
-print("\n" + "=" * 50)
-print("Data Integration: Merging All Feature Tables")
-print("=" * 50)
+master_data = customers.copy()
+master_data = master_data.merge(session_features, on="customer_id", how="left")
+master_data = master_data.merge(transaction_features, on="customer_id", how="left")
+master_data = master_data.merge(customer_primary_region, on="customer_id", how="left")
+master_data = master_data.merge(campaign_features, on="customer_id", how="left")
+master_data = master_data.merge(customer_campaign_type, on="customer_id", how="left")
+master_data = master_data.merge(geo_data, on="geo_ip_region", how="left")
 
-# Merge customer profiles with session, transaction, region, and marketing metrics
-master_df = customers.copy()
-
-master_df = pd.merge(master_df, session_features, on="customer_id", how="left")
-master_df = pd.merge(master_df, transaction_features, on="customer_id", how="left")
-master_df = pd.merge(master_df, customer_primary_region, on="customer_id", how="left")
-master_df = pd.merge(master_df, campaign_features, on="customer_id", how="left")
-master_df = pd.merge(master_df, customer_campaign_type, on="customer_id", how="left")
-
-# Merge Geo-economic contextual signals using primary region
-master_df = pd.merge(master_df, geo_data, on="geo_ip_region", how="left")
-
-# Impute zero/default values for customers without marketing campaign visits
-master_df["avg_campaign_budget"] = master_df["avg_campaign_budget"].fillna(0)
-master_df["total_campaign_budget"] = master_df["total_campaign_budget"].fillna(0)
-master_df["primary_campaign_type"] = master_df["primary_campaign_type"].fillna("None")
-
-# Impute zero activity for customers without recorded sessions or transactions
-zero_fill_cols = [
-    "total_sessions", "avg_session_duration", "total_pages_viewed", "avg_pages_viewed",
-    "total_cart_additions", "avg_cart_additions", "bounce_rate",
-    "total_transactions", "total_spent", "avg_order_value", "max_order_value",
-    "total_items", "avg_items_per_order", "discount_trans_ratio"
+activity_columns = [
+    "total_sessions", "avg_session_duration", "total_pages_viewed",
+    "avg_pages_viewed", "total_cart_additions", "avg_cart_additions",
+    "bounce_rate", "total_transactions", "total_spent", "avg_order_value",
+    "max_order_value", "total_items", "avg_items_per_order",
+    "discount_trans_ratio", "avg_campaign_budget", "total_campaign_budget",
+    "sessions_last_30_days", "sessions_last_90_days", "sessions_last_180_days",
+    "transactions_last_30_days", "transactions_last_90_days",
+    "transactions_last_180_days", "order_value_last_90_days",
 ]
-master_df[zero_fill_cols] = master_df[zero_fill_cols].fillna(0)
+master_data[activity_columns] = master_data[activity_columns].fillna(0)
+master_data["recency_session_days"] = master_data["recency_session_days"].fillna(9999)
+master_data["recency_trans_days"] = master_data["recency_trans_days"].fillna(9999)
+master_data["geo_ip_region"] = master_data["geo_ip_region"].fillna("Unknown")
+master_data["region_tier"] = master_data["region_tier"].fillna("Unknown")
+master_data["primary_campaign_type"] = master_data["primary_campaign_type"].fillna("Unknown")
 
-# Impute high default recency for customers with no sessions or transactions
-master_df["recency_session_days"] = master_df["recency_session_days"].fillna(9999)
-master_df["recency_trans_days"] = master_df["recency_trans_days"].fillna(9999)
-
-
-#=======================
-#       Cross-Domain Behavioral Interaction Ratios
-#=======================
-
-print("\n" + "=" * 50)
-print("Feature Engineering: Cross-Domain Behavioral Ratios")
-print("=" * 50)
-
-# Cart-to-purchase conversion efficiency
-master_df["cart_to_order_ratio"] = master_df["total_transactions"] / (master_df["total_cart_additions"] + 1)
-
-# Monetary spend velocity per session
-master_df["spend_per_session"] = master_df["total_spent"] / (master_df["total_sessions"] + 1)
-
-# Page engagement intensity per session
-master_df["pages_per_session"] = master_df["total_pages_viewed"] / (master_df["total_sessions"] + 1)
-
-# Total spend to credit limit ratio
-master_df["spend_to_credit_ratio"] = master_df["total_spent"] / (master_df["credit_limit"] + 1)
-
-# Impute unmapped geo features for rare customers without session records
-master_df["geo_ip_region"] = master_df["geo_ip_region"].fillna("region_unknown")
-master_df["region_tier"] = master_df["region_tier"].fillna("TierUnknown")
-
-# Impute geo features using medians derived strictly from training customers
-train_master_mask = master_df["customer_id"].isin(train_cust_set)
-master_df["average_income"] = master_df["average_income"].fillna(
-    master_df.loc[train_master_mask, "average_income"].median()
+# Add simple ratios that describe customer engagement and spending.
+master_data["cart_to_order_ratio"] = (
+    master_data["total_transactions"] / (master_data["total_cart_additions"] + 1)
 )
-master_df["urban_ratio"] = master_df["urban_ratio"].fillna(
-    master_df.loc[train_master_mask, "urban_ratio"].median()
+master_data["spend_per_session"] = (
+    master_data["total_spent"] / (master_data["total_sessions"] + 1)
 )
-master_df["internet_penetration"] = master_df["internet_penetration"].fillna(
-    master_df.loc[train_master_mask, "internet_penetration"].median()
+master_data["pages_per_session"] = (
+    master_data["total_pages_viewed"] / (master_data["total_sessions"] + 1)
+)
+master_data["spend_to_credit_ratio"] = (
+    master_data["total_spent"] / (master_data["credit_limit"] + 1)
+)
+master_data["recent_spend_share_90_days"] = (
+    master_data["order_value_last_90_days"] / (master_data["total_spent"] + 1)
 )
 
-print("\nUnified Customer Master Feature Dataset:")
-print("Shape:", master_df.shape)
-print("Unique Customers:", master_df["customer_id"].nunique())
-print("Total Missing Values Remaining:", master_df.isnull().sum().sum())
-print("\nFirst 3 Rows of Key Engineered Features:")
-print(master_df[[
-    "customer_id", "customer_tenure_days", "total_sessions", "total_spent",
-    "avg_order_value", "cart_to_order_ratio", "spend_to_credit_ratio"
-]].head(3))
+for column in ["average_income", "urban_ratio", "internet_penetration"]:
+    median_value = master_data.loc[
+        master_data["customer_id"].isin(train_customer_set), column
+    ].median()
+    master_data[column] = master_data[column].fillna(median_value)
+
+print("Combined customer data:", master_data.shape)
+print("Unique customers:", master_data["customer_id"].nunique())
+print("Remaining missing values:", master_data.isnull().sum().sum())
 
 
-#=======================
-#       Correlation Analysis with Target
-#=======================
+#================ OBJECTIVE 5: PLOT TRAINING FEATURE CORRELATIONS ================
+# Use training customers only so validation labels do not influence this chart.
+print("\n================ PLOTTING TRAINING CORRELATION MATRIX ================")
+training_correlation_data = master_data[
+    master_data["customer_id"].isin(train_customer_set)
+].merge(train_data, on="customer_id", how="inner")
+correlation_columns = training_correlation_data.select_dtypes(
+    include="number"
+).columns.drop("customer_id", errors="ignore")
+correlation_matrix = training_correlation_data[correlation_columns].corr()
+target_correlations = correlation_matrix["target"].drop("target")
+top_correlation_features = target_correlations.abs().nlargest(12).index.tolist()
+heatmap_columns = top_correlation_features + ["target"]
 
-print("\n" + "=" * 50)
-print("Correlation Analysis with Target")
-print("=" * 50)
-
-# Merge master features with training targets to evaluate linear associations
-train_features = pd.merge(master_df, train_data, on="customer_id", how="inner")
-
-# Select numerical columns excluding customer_id
-numeric_cols = train_features.select_dtypes(include=[np.number]).columns.drop("customer_id")
-corr_matrix = train_features[numeric_cols].corr()
-
-# Rank features by linear correlation with target (0 = Retained, 1 = Churned)
-target_corr = corr_matrix["target"].drop("target").sort_values(ascending=False)
-
-print("\nTop 10 Features Positively Correlated with Churn (Target = 1):")
-print(target_corr.head(10).round(4))
-
-print("\nTop 10 Features Negatively Correlated with Churn (Retained, Target = 0):")
-print(target_corr.tail(10).round(4))
-
-# Inspect synthetic noise columns correlation
-noise_cols = [c for c in target_corr.index if "noise" in c]
-if noise_cols:
-    print("\nCorrelation of Synthetic Noise Columns with Target (Benchmark):")
-    print(target_corr[noise_cols].round(4))
-
-
-#=======================
-#       Multicollinearity Analysis
-#=======================
-
-print("\n" + "=" * 50)
-print("Multicollinearity Inspection (Highly Correlated Feature Pairs)")
-print("=" * 50)
-
-feature_corr = corr_matrix.drop("target", axis=0).drop("target", axis=1)
-
-high_corr_pairs = []
-for i in range(len(feature_corr.columns)):
-    for j in range(i + 1, len(feature_corr.columns)):
-        col1 = feature_corr.columns[i]
-        col2 = feature_corr.columns[j]
-        val = feature_corr.iloc[i, j]
-        if abs(val) > 0.80:
-            high_corr_pairs.append((col1, col2, round(val, 4)))
-
-high_corr_df = pd.DataFrame(high_corr_pairs, columns=["Feature 1", "Feature 2", "Pearson r"])
-high_corr_df = high_corr_df.sort_values(by="Pearson r", key=abs, ascending=False).reset_index(drop=True)
-
-print(f"\nTotal Pairs with |r| > 0.80: {len(high_corr_df)}")
-print(high_corr_df.head(15))
-
-
-#=======================
-#       Correlation Heatmap Visualization
-#=======================
-
-print("\n" + "=" * 50)
-print("Correlation Heatmap Visualization")
-print("=" * 50)
-
-# Select top correlated features with target for an uncluttered, interpretable heatmap
-top_features = target_corr.abs().sort_values(ascending=False).head(14).index.tolist()
-heatmap_cols = ["target"] + top_features
-
-plt.figure(figsize=(12, 10))
+plt.figure(figsize=(12, 9))
 sns.heatmap(
-    train_features[heatmap_cols].corr(),
+    correlation_matrix.loc[heatmap_columns, heatmap_columns],
     annot=True,
     fmt=".2f",
     cmap="coolwarm",
-    vmin=-1,
-    vmax=1,
-    linewidths=0.5
+    center=0,
+    linewidths=0.4,
 )
-plt.title("Correlation Matrix of Top Features with Target")
-plt.tight_layout()
-plt.show()
+plt.title("Training Feature Correlation Matrix (Top Features)")
+save_graph("03_training_correlation_matrix.png")
 
 
-#=======================
-#       Separate Features and Target (Strict Partitioning)
-#=======================
+#================ OBJECTIVE 5: PREPARE TRAIN AND VALIDATION DATA ================
+print("\n================ PREPARING MODEL INPUTS ================")
 
-# Merge master feature dataset with train target labels
-train_full = pd.merge(master_df, train_data, on="customer_id", how="inner")
+labelled_data = master_data.merge(train_data, on="customer_id", how="inner")
+training_rows = labelled_data["customer_id"].isin(train_customer_set)
+validation_rows = labelled_data["customer_id"].isin(validation_customer_set)
+training_data = labelled_data.loc[training_rows].copy()
+validation_data = labelled_data.loc[validation_rows].copy()
 
-drop_cols = [
+drop_columns = [
     "customer_id", "target", "signup_date", "referral_code",
     "noise_customer_0", "noise_customer_1", "noise_customer_2",
-    "noise_customer_3", "noise_customer_4",
-    "pages_per_session", "signup_year"
+    "noise_customer_3", "noise_customer_4", "pages_per_session", "signup_year",
+]
+categorical_columns = [
+    "country_code", "region", "customer_tier", "geo_ip_region",
+    "region_tier", "primary_campaign_type",
 ]
 
-cat_cols = [
-    "country_code", "region", "customer_tier",
-    "geo_ip_region", "region_tier", "primary_campaign_type"
+X_train_raw = training_data.drop(columns=drop_columns, errors="ignore")
+y_train = training_data["target"]
+X_validation_raw = validation_data.drop(columns=drop_columns, errors="ignore")
+y_validation = validation_data["target"]
+
+all_numeric_columns = [
+    column for column in X_train_raw.columns if column not in categorical_columns
 ]
 
-# Partition strictly using the pre-established customer sets
-train_split = train_full[train_full["customer_id"].isin(train_cust_set)].copy()
-val_split = train_full[train_full["customer_id"].isin(set(val_cust_ids))].copy()
+# Hold out part of the training split for threshold calibration. The final
+# validation customers remain untouched until model evaluation.
+model_fit_indices, threshold_indices = train_test_split(
+    X_train_raw.index.to_numpy(),
+    test_size=0.20,
+    random_state=RANDOM_STATE,
+    stratify=y_train,
+)
+model_fit_indices = pd.Index(model_fit_indices)
+threshold_indices = pd.Index(threshold_indices)
+y_model_fit = y_train.loc[model_fit_indices]
+y_threshold = y_train.loc[threshold_indices]
 
-X_train_raw = train_split.drop(columns=drop_cols)
-y_train = train_split["target"]
+# Encode using model-fit customers only. Calibration and final validation rows
+# are transformed with this encoder and cannot influence category discovery.
+initial_encoder = OneHotEncoder(drop="first", handle_unknown="ignore")
+initial_encoder.fit(X_train_raw.loc[model_fit_indices, categorical_columns])
+initial_train_categories = initial_encoder.transform(
+    X_train_raw[categorical_columns]
+).toarray()
+initial_validation_categories = initial_encoder.transform(
+    X_validation_raw[categorical_columns]
+).toarray()
+initial_category_names = initial_encoder.get_feature_names_out(categorical_columns)
 
-X_val_raw = val_split.drop(columns=drop_cols)
-y_val = val_split["target"]
+initial_train_category_data = pd.DataFrame(
+    initial_train_categories,
+    columns=initial_category_names,
+    index=X_train_raw.index,
+)
+initial_validation_category_data = pd.DataFrame(
+    initial_validation_categories,
+    columns=initial_category_names,
+    index=X_validation_raw.index,
+)
+initial_X_train = pd.concat(
+    [X_train_raw[all_numeric_columns], initial_train_category_data], axis=1
+)
+initial_X_validation = pd.concat(
+    [X_validation_raw[all_numeric_columns], initial_validation_category_data], axis=1
+)
 
-print("\nX_train Raw Shape:", X_train_raw.shape)
-print("X_val Raw Shape:  ", X_val_raw.shape)
+initial_scaler = StandardScaler()
+initial_scaler.fit(initial_X_train.loc[model_fit_indices])
+initial_X_train_scaled = initial_scaler.transform(initial_X_train)
+model_fit_positions = initial_X_train.index.get_indexer(model_fit_indices)
+threshold_positions = initial_X_train.index.get_indexer(threshold_indices)
 
+# Use stratified folds to find source features that are repeatedly useful.
+# Importance is averaged across folds instead of relying on one tree fit.
+print("\n================ CROSS-VALIDATING FEATURE IMPORTANCE ================")
+feature_importance = dict.fromkeys(all_numeric_columns + categorical_columns, 0.0)
+feature_selection_frequency = dict.fromkeys(feature_importance, 0)
+feature_folds = StratifiedKFold(n_splits=3, shuffle=True, random_state=RANDOM_STATE)
+fit_feature_matrix = initial_X_train_scaled[model_fit_positions]
+fit_feature_labels = y_model_fit.to_numpy()
 
-#=======================
-#       Encode Categories (OneHotEncoder Fit on Train Only)
-#=======================
+for fold_number, (fold_train_indices, _) in enumerate(
+    feature_folds.split(fit_feature_matrix, fit_feature_labels), start=1
+):
+    feature_ranker = DecisionTreeClassifier(
+        max_depth=6,
+        random_state=RANDOM_STATE + fold_number,
+        class_weight="balanced",
+    )
+    feature_ranker.fit(
+        fit_feature_matrix[fold_train_indices],
+        fit_feature_labels[fold_train_indices],
+    )
 
-# Fit encoder strictly on X_train to prevent categorical lookahead leakage
-ohe = OneHotEncoder(drop="first", sparse_output=False, handle_unknown="ignore")
-X_train_cat = ohe.fit_transform(X_train_raw[cat_cols])
-X_val_cat = ohe.transform(X_val_raw[cat_cols])
+    fold_importance = dict.fromkeys(feature_importance, 0.0)
+    for encoded_name, importance in zip(
+        initial_X_train.columns, feature_ranker.feature_importances_
+    ):
+        if encoded_name in fold_importance:
+            fold_importance[encoded_name] += importance
+        else:
+            for column in sorted(categorical_columns, key=len, reverse=True):
+                if encoded_name.startswith(column + "_"):
+                    fold_importance[column] += importance
+                    break
 
-cat_feature_names = ohe.get_feature_names_out(cat_cols)
-num_cols = [c for c in X_train_raw.columns if c not in cat_cols]
+    for column, importance in fold_importance.items():
+        feature_importance[column] += importance / 3
+    fold_top_features = sorted(
+        fold_importance, key=fold_importance.get, reverse=True
+    )[:TOP_INPUT_FEATURE_COUNT]
+    for column in fold_top_features:
+        feature_selection_frequency[column] += 1
 
-X_train_cat_df = pd.DataFrame(X_train_cat, columns=cat_feature_names, index=X_train_raw.index)
-X_val_cat_df = pd.DataFrame(X_val_cat, columns=cat_feature_names, index=X_val_raw.index)
+print("Feature importance averaged over 3 stratified folds.")
 
-X_train = pd.concat([X_train_raw[num_cols], X_train_cat_df], axis=1)
-X_val = pd.concat([X_val_raw[num_cols], X_val_cat_df], axis=1)
+selected_input_columns = sorted(
+    feature_importance,
+    key=feature_importance.get,
+    reverse=True,
+)[:TOP_INPUT_FEATURE_COUNT]
+# Keep both numeric and categorical inputs represented in the selected set.
+if not any(column in categorical_columns for column in selected_input_columns):
+    best_categorical = max(categorical_columns, key=feature_importance.get)
+    selected_input_columns[-1] = best_categorical
+if not any(column in all_numeric_columns for column in selected_input_columns):
+    best_numeric = max(all_numeric_columns, key=feature_importance.get)
+    selected_input_columns[-1] = best_numeric
+selected_input_columns = list(dict.fromkeys(selected_input_columns))
+print(f"\nSelected top {TOP_INPUT_FEATURE_COUNT} input features:")
+for column in selected_input_columns:
+    print(
+        column,
+        "- mean importance:", round(feature_importance[column], 4),
+        "- selected in folds:", feature_selection_frequency[column], "/ 3",
+    )
 
-print("\nFeatures Shape After Encoding (Train):", X_train.shape)
-print("Features Shape After Encoding (Val):  ", X_val.shape)
+numeric_columns = [
+    column for column in selected_input_columns if column in all_numeric_columns
+]
+categorical_columns = [
+    column for column in selected_input_columns if column in categorical_columns
+]
 
+# Refit encoding and scaling using only the selected inputs.
+encoder = OneHotEncoder(drop="first", handle_unknown="ignore")
+encoder.fit(X_train_raw.loc[model_fit_indices, categorical_columns])
+X_train_categories = encoder.transform(X_train_raw[categorical_columns]).toarray()
+X_validation_categories = encoder.transform(
+    X_validation_raw[categorical_columns]
+).toarray()
+category_names = encoder.get_feature_names_out(categorical_columns)
 
-#=======================
-#       Scale Features (StandardScaler Fit on Train Only)
-#=======================
+X_train_category_data = pd.DataFrame(
+    X_train_categories, columns=category_names, index=X_train_raw.index
+)
+X_validation_category_data = pd.DataFrame(
+    X_validation_categories, columns=category_names, index=X_validation_raw.index
+)
+X_train = pd.concat([X_train_raw[numeric_columns], X_train_category_data], axis=1)
+X_validation = pd.concat(
+    [X_validation_raw[numeric_columns], X_validation_category_data], axis=1
+)
+feature_columns = X_train.columns.tolist()
 
 scaler = StandardScaler()
+scaler.fit(X_train.loc[model_fit_indices])
+X_train_scaled = scaler.transform(X_train)
+X_validation_scaled = scaler.transform(X_validation[feature_columns])
+model_fit_positions = X_train.index.get_indexer(model_fit_indices)
+threshold_positions = X_train.index.get_indexer(threshold_indices)
 
-X_train_scaled = scaler.fit_transform(X_train)
-X_val_scaled = scaler.transform(X_val)
-
-print("\nFeatures Scaled Successfully (Fit on Train, Transformed Val).")
-
-
-#=======================
-#       Model Implementation (Logistic Regression)
-#=======================
-
-model = LogisticRegression(
-    max_iter=1000,
-    random_state=42,
-    class_weight="balanced"
-)
-
-print("\nTraining Logistic Regression Model...")
-model.fit(X_train_scaled, y_train)
-print("Model Training Complete.")
+print("Selected raw input count:", len(selected_input_columns))
+print("Encoded model feature count:", len(feature_columns))
+print("Training feature shape:", X_train_scaled.shape)
+print("Validation feature shape:", X_validation_scaled.shape)
+print("Hyperparameter tuning: three-fold stratified CV on a 20,000-row training sample.")
 
 
-#=======================
-#       Helper: Optimal Threshold Search
-#=======================
+#================ OBJECTIVE 6: TRAIN AND EVALUATE MODELS ================
+def find_best_threshold(actual_values, probabilities):
+    """Find a probability threshold that gives the best calibration F1 score."""
+    best_threshold = 0.50
+    best_f1 = 0
 
-def find_optimal_threshold(y_true, y_prob):
-    """Searches probability thresholds to maximize F1-score on positive churn class."""
-    thresholds = np.linspace(0.10, 0.90, 81)
-    best_th = 0.50
-    best_f1 = -1.0
-    for th in thresholds:
-        pred = (y_prob >= th).astype(int)
-        score = f1_score(y_true, pred, zero_division=0)
+    for threshold_value in np.arange(0.20, 0.81, 0.01):
+        predictions = (probabilities >= threshold_value).astype(int)
+        score = f1_score(actual_values, predictions, zero_division=0)
         if score > best_f1:
             best_f1 = score
-            best_th = th
-    return round(best_th, 3)
+            best_threshold = threshold_value
+
+    return best_threshold
 
 
-#=======================
-#       Model Predictions & Evaluation (Logistic Regression)
-#=======================
-
-y_pred_lr = model.predict(X_val_scaled)
-y_prob_lr = model.predict_proba(X_val_scaled)[:, 1]
-
-# Default threshold evaluation (p = 0.50)
-print("\nLogistic Regression (Default p = 0.50):")
-print("Validation Accuracy:", accuracy_score(y_val, y_pred_lr))
-print("Classification Report:")
-print(classification_report(y_val, y_pred_lr))
-print("ROC-AUC Score:", roc_auc_score(y_val, y_prob_lr))
-
-# Optimal threshold evaluation
-opt_th_lr = find_optimal_threshold(y_val, y_prob_lr)
-y_pred_lr_opt = (y_prob_lr >= opt_th_lr).astype(int)
-
-print(f"\nLogistic Regression (Optimal F1 Threshold p = {opt_th_lr:.3f}):")
-print("Validation Accuracy:", accuracy_score(y_val, y_pred_lr_opt))
-print("Recall (Churn Caught):", recall_score(y_val, y_pred_lr_opt))
-print("F1-Score:             ", f1_score(y_val, y_pred_lr_opt))
-print("Confusion Matrix:")
-print(confusion_matrix(y_val, y_pred_lr_opt))
-
-models_results = [
-    {
-        "Model": "Logistic Regression (Default)",
-        "Algorithm": "Logistic Regression",
-        "Threshold": 0.50,
-        "Accuracy": accuracy_score(y_val, y_pred_lr),
-        "Precision": precision_score(y_val, y_pred_lr, zero_division=0),
-        "Recall": recall_score(y_val, y_pred_lr),
-        "F1-Score": f1_score(y_val, y_pred_lr),
-        "ROC-AUC": roc_auc_score(y_val, y_prob_lr),
-        "y_pred": y_pred_lr,
-        "y_prob": y_prob_lr
-    },
-    {
-        "Model": f"Logistic Regression (p={opt_th_lr:.2f})",
-        "Algorithm": "Logistic Regression",
-        "Threshold": opt_th_lr,
-        "Accuracy": accuracy_score(y_val, y_pred_lr_opt),
-        "Precision": precision_score(y_val, y_pred_lr_opt, zero_division=0),
-        "Recall": recall_score(y_val, y_pred_lr_opt),
-        "F1-Score": f1_score(y_val, y_pred_lr_opt),
-        "ROC-AUC": roc_auc_score(y_val, y_prob_lr),
-        "y_pred": y_pred_lr_opt,
-        "y_prob": y_prob_lr
-    }
-]
-
-
-#=======================
-#       Model Implementation (K-Nearest Neighbors)
-#=======================
-
-print("\n" + "=" * 50)
-print("Model Implementation: K-Nearest Neighbors (KNN)")
-print("=" * 50)
-
-knn_model = KNeighborsClassifier(n_neighbors=5)
-
-print("\nTraining K-Nearest Neighbors Model...")
-knn_model.fit(X_train_scaled, y_train)
-print("KNN Training Complete.")
-
-y_prob_knn = knn_model.predict_proba(X_val_scaled)[:, 1]
-y_pred_knn = (y_prob_knn >= 0.5).astype(int)
-
-print("\nKNN Validation Accuracy:", accuracy_score(y_val, y_pred_knn))
-print("\nKNN Confusion Matrix:")
-print(confusion_matrix(y_val, y_pred_knn))
-print("\nKNN Classification Report:")
-print(classification_report(y_val, y_pred_knn))
-print("KNN ROC-AUC Score:", roc_auc_score(y_val, y_prob_knn))
-
-models_results.append({
-    "Model": "K-Nearest Neighbors",
-    "Algorithm": "K-Nearest Neighbors",
-    "Threshold": 0.50,
-    "Accuracy": accuracy_score(y_val, y_pred_knn),
-    "Precision": precision_score(y_val, y_pred_knn, zero_division=0),
-    "Recall": recall_score(y_val, y_pred_knn),
-    "F1-Score": f1_score(y_val, y_pred_knn),
-    "ROC-AUC": roc_auc_score(y_val, y_prob_knn),
-    "y_pred": y_pred_knn,
-    "y_prob": y_prob_knn
-})
-
-
-#=======================
-#       Model Implementation (Naive Bayes)
-#=======================
-
-print("\n" + "=" * 50)
-print("Model Implementation: Naive Bayes (GaussianNB)")
-print("=" * 50)
-
-nb_model = GaussianNB()
-
-print("\nTraining Naive Bayes Model...")
-nb_model.fit(X_train_scaled, y_train)
-print("Naive Bayes Training Complete.")
-
-y_pred_nb = nb_model.predict(X_val_scaled)
-y_prob_nb = nb_model.predict_proba(X_val_scaled)[:, 1]
-
-print("\nNaive Bayes Validation Accuracy:", accuracy_score(y_val, y_pred_nb))
-print("\nNaive Bayes Confusion Matrix:")
-print(confusion_matrix(y_val, y_pred_nb))
-print("\nNaive Bayes Classification Report:")
-print(classification_report(y_val, y_pred_nb))
-print("Naive Bayes ROC-AUC Score:", roc_auc_score(y_val, y_prob_nb))
-
-models_results.append({
-    "Model": "Naive Bayes",
-    "Algorithm": "Naive Bayes",
-    "Threshold": 0.50,
-    "Accuracy": accuracy_score(y_val, y_pred_nb),
-    "Precision": precision_score(y_val, y_pred_nb, zero_division=0),
-    "Recall": recall_score(y_val, y_pred_nb),
-    "F1-Score": f1_score(y_val, y_pred_nb),
-    "ROC-AUC": roc_auc_score(y_val, y_prob_nb),
-    "y_pred": y_pred_nb,
-    "y_prob": y_prob_nb
-})
-
-
-#=======================
-#       Model Implementation (Decision Tree)
-#=======================
-
-print("\n" + "=" * 50)
-print("Model Implementation: Decision Tree")
-print("=" * 50)
-
-dt_model = DecisionTreeClassifier(
-    max_depth=6,
-    random_state=42,
-    class_weight="balanced"
-)
-
-print("\nTraining Decision Tree Model...")
-dt_model.fit(X_train_scaled, y_train)
-print("Decision Tree Training Complete.")
-
-y_pred_dt = dt_model.predict(X_val_scaled)
-y_prob_dt = dt_model.predict_proba(X_val_scaled)[:, 1]
-
-# Default threshold evaluation (p = 0.50)
-print("\nDecision Tree (Default p = 0.50):")
-print("Validation Accuracy:", accuracy_score(y_val, y_pred_dt))
-print("Classification Report:")
-print(classification_report(y_val, y_pred_dt))
-print("ROC-AUC Score:", roc_auc_score(y_val, y_prob_dt))
-
-# Optimal threshold evaluation
-opt_th_dt = find_optimal_threshold(y_val, y_prob_dt)
-y_pred_dt_opt = (y_prob_dt >= opt_th_dt).astype(int)
-
-print(f"\nDecision Tree (Optimal F1 Threshold p = {opt_th_dt:.3f}):")
-print("Validation Accuracy:", accuracy_score(y_val, y_pred_dt_opt))
-print("Recall (Churn Caught):", recall_score(y_val, y_pred_dt_opt))
-print("F1-Score:             ", f1_score(y_val, y_pred_dt_opt))
-print("Confusion Matrix:")
-print(confusion_matrix(y_val, y_pred_dt_opt))
-
-models_results.extend([
-    {
-        "Model": "Decision Tree (Default)",
-        "Algorithm": "Decision Tree",
-        "Threshold": 0.50,
-        "Accuracy": accuracy_score(y_val, y_pred_dt),
-        "Precision": precision_score(y_val, y_pred_dt, zero_division=0),
-        "Recall": recall_score(y_val, y_pred_dt),
-        "F1-Score": f1_score(y_val, y_pred_dt),
-        "ROC-AUC": roc_auc_score(y_val, y_prob_dt),
-        "y_pred": y_pred_dt,
-        "y_prob": y_prob_dt
-    },
-    {
-        "Model": f"Decision Tree (p={opt_th_dt:.2f})",
-        "Algorithm": "Decision Tree",
-        "Threshold": opt_th_dt,
-        "Accuracy": accuracy_score(y_val, y_pred_dt_opt),
-        "Precision": precision_score(y_val, y_pred_dt_opt, zero_division=0),
-        "Recall": recall_score(y_val, y_pred_dt_opt),
-        "F1-Score": f1_score(y_val, y_pred_dt_opt),
-        "ROC-AUC": roc_auc_score(y_val, y_prob_dt),
-        "y_pred": y_pred_dt_opt,
-        "y_prob": y_prob_dt
-    }
-])
-
-
-#=======================
-#       Model Performance Comparison
-#=======================
-
-print("\n" + "=" * 50)
-print("Model Evaluation & Metrics Comparison Summary")
-print("=" * 50)
-
-comparison_df = pd.DataFrame([{
-    "Model": r["Model"],
-    "Threshold": f"{r['Threshold']:.2f}",
-    "Accuracy": round(r["Accuracy"], 4),
-    "Precision": round(r["Precision"], 4),
-    "Recall": round(r["Recall"], 4),
-    "F1-Score": round(r["F1-Score"], 4),
-    "ROC-AUC": round(r["ROC-AUC"], 4)
-} for r in models_results])
-
-print("\nSummary Comparison Table (Ranked by F1-Score):")
-print(comparison_df.sort_values(by="F1-Score", ascending=False).to_string(index=False))
-
-best_f1_entry = comparison_df.sort_values(by="F1-Score", ascending=False).iloc[0]
-best_auc_entry = comparison_df.sort_values(by="ROC-AUC", ascending=False).iloc[0]
-print(f"\nBest Model by F1-Score: {best_f1_entry['Model']} (F1 = {best_f1_entry['F1-Score']:.4f}, Recall = {best_f1_entry['Recall']:.4f})")
-print(f"Best Model by ROC-AUC:  {best_auc_entry['Model']} (AUC = {best_auc_entry['ROC-AUC']:.4f})")
-
-
-#=======================
-#       Comparative Visualizations
-#=======================
-
-# 1. Bar Chart: Performance Metrics Across Models
-metrics_melted = comparison_df.melt(
-    id_vars=["Model"],
-    value_vars=["Accuracy", "Precision", "Recall", "F1-Score", "ROC-AUC"],
-    var_name="Metric",
-    value_name="Score"
-)
-
-plt.figure(figsize=(14, 6))
-sns.barplot(x="Metric", y="Score", hue="Model", data=metrics_melted, palette="Set2")
-plt.title("Model Performance Metrics Comparison Across Decision Thresholds", fontsize=14, pad=12)
-plt.ylim(0, 1.05)
-plt.ylabel("Score")
-plt.xlabel("Evaluation Metric")
-plt.legend(title="Configuration", bbox_to_anchor=(1.02, 1), loc="upper left")
-plt.grid(axis="y", linestyle="--", alpha=0.6)
-plt.tight_layout()
-plt.show()
-
-# 2. ROC Curves Comparison (Unique Algorithms)
-plt.figure(figsize=(9, 7))
-seen_algos = set()
-for r in models_results:
-    algo = r["Algorithm"]
-    if algo not in seen_algos:
-        seen_algos.add(algo)
-        fpr, tpr, _ = roc_curve(y_val, r["y_prob"])
-        plt.plot(fpr, tpr, label=f"{algo} (AUC = {r['ROC-AUC']:.4f})", linewidth=2)
-
-plt.plot([0, 1], [0, 1], "k--", label="Random Chance (AUC = 0.5000)", alpha=0.7)
-plt.title("Receiver Operating Characteristic (ROC) Curves", fontsize=14, pad=12)
-plt.xlabel("False Positive Rate (1 - Specificity)")
-plt.ylabel("True Positive Rate (Sensitivity / Recall)")
-plt.legend(loc="lower right")
-plt.grid(True, linestyle="--", alpha=0.6)
-plt.tight_layout()
-plt.show()
-
-# 3. Confusion Matrices 2x2 Subplots (Threshold-Optimized Operational Grid)
-plot_models = [
-    [r for r in models_results if r["Model"].startswith("Decision Tree (p=")][0],
-    [r for r in models_results if r["Model"].startswith("Logistic Regression (p=")][0],
-    [r for r in models_results if r["Model"] == "K-Nearest Neighbors"][0],
-    [r for r in models_results if r["Model"] == "Naive Bayes"][0]
-]
-
-fig, axes = plt.subplots(2, 2, figsize=(11, 9))
-axes = axes.flatten()
-
-for idx, r in enumerate(plot_models):
-    cm = confusion_matrix(y_val, r["y_pred"])
-    sns.heatmap(
-        cm,
-        annot=True,
-        fmt="d",
-        cmap="Blues",
-        cbar=False,
-        ax=axes[idx],
-        annot_kws={"size": 13}
+def tune_model(model_name, model, parameter_grid, sample_weights=None):
+    """Tune one classifier on training-only folds and return its best estimator."""
+    print(f"\n================ TUNING {model_name.upper()} ================")
+    search = GridSearchCV(
+        estimator=model,
+        param_grid=parameter_grid,
+        scoring="average_precision",
+        cv=StratifiedKFold(n_splits=3, shuffle=True, random_state=RANDOM_STATE),
+        n_jobs=1,
+        refit=True,
+        verbose=0,
     )
-    axes[idx].set_title(f"{r['Model']}\nConfusion Matrix", fontsize=11)
-    axes[idx].set_xlabel("Predicted Label")
-    axes[idx].set_ylabel("Actual Label")
-    axes[idx].set_xticklabels(["Retained (0)", "Churned (1)"])
-    axes[idx].set_yticklabels(["Retained (0)", "Churned (1)"])
-
-plt.tight_layout()
-plt.show()
-
-#=======================
-#       Check Model Variables
-#=======================
-
-print("Available model variables:")
-
-for name, value in globals().copy().items():
-    if "model" in name.lower() or "tree" in name.lower():
-        if hasattr(value, "predict"):
-            print(name, "->", type(value).__name__)
-            
-#=======================
-#       Check Model Readiness
-#=======================
+    fit_arguments = {}
+    if sample_weights is not None:
+        fit_arguments["sample_weight"] = sample_weights
+    search.fit(X_tuning, y_tuning, **fit_arguments)
+    tuning_scores[model_name] = search.best_score_
+    print("Best CV average precision:", round(search.best_score_, 4))
+    print("Best parameters:", search.best_params_)
+    return search.best_estimator_, search.best_params_
 
 
-models_to_check = {
-    "Logistic Regression": model,
-    "KNN": knn_model,
-    "Naive Bayes": nb_model,
-    "Decision Tree": dt_model
+# Use a stratified sample for tractable tuning; final candidate fits still use
+# the full model-fit partition, while calibration and final validation stay separate.
+tuning_rows = min(20000, len(model_fit_positions))
+tuning_sample_positions, _ = train_test_split(
+    np.arange(len(model_fit_positions)),
+    train_size=tuning_rows,
+    random_state=RANDOM_STATE,
+    stratify=y_model_fit,
+)
+tuning_positions = model_fit_positions[tuning_sample_positions]
+X_tuning = X_train_scaled[tuning_positions]
+y_tuning = y_model_fit.iloc[tuning_sample_positions]
+tuned_parameters = {}
+tuning_scores = {}
+
+
+print("\n================ TUNING LOGISTIC REGRESSION ================")
+logistic_model, tuned_parameters["Logistic Regression"] = tune_model(
+    "Logistic Regression",
+    LogisticRegression(
+        max_iter=1000, random_state=RANDOM_STATE, class_weight="balanced"
+    ),
+    {"C": [0.1, 1.0, 10.0]},
+)
+logistic_model.fit(X_train_scaled[model_fit_positions], y_model_fit)
+logistic_threshold_probabilities = logistic_model.predict_proba(
+    X_train_scaled[threshold_positions]
+)[:, 1]
+logistic_probabilities = logistic_model.predict_proba(X_validation_scaled)[:, 1]
+logistic_threshold = find_best_threshold(y_threshold, logistic_threshold_probabilities)
+
+print("\n================ TUNING K-NEAREST NEIGHBORS ================")
+knn_model, tuned_parameters["K-Nearest Neighbors"] = tune_model(
+    "K-Nearest Neighbors",
+    KNeighborsClassifier(n_jobs=1),
+    {"n_neighbors": [5, 11, 21], "weights": ["uniform", "distance"]},
+)
+knn_model.fit(X_train_scaled[model_fit_positions], y_model_fit)
+knn_threshold_probabilities = knn_model.predict_proba(
+    X_train_scaled[threshold_positions]
+)[:, 1]
+knn_probabilities = knn_model.predict_proba(X_validation_scaled)[:, 1]
+knn_threshold = find_best_threshold(y_threshold, knn_threshold_probabilities)
+
+print("\n================ TUNING NAIVE BAYES ================")
+naive_bayes_model, tuned_parameters["Naive Bayes"] = tune_model(
+    "Naive Bayes",
+    GaussianNB(),
+    {"var_smoothing": [1e-11, 1e-10, 1e-9, 1e-8]},
+)
+naive_bayes_model.fit(X_train_scaled[model_fit_positions], y_model_fit)
+naive_bayes_threshold_probabilities = naive_bayes_model.predict_proba(
+    X_train_scaled[threshold_positions]
+)[:, 1]
+naive_bayes_probabilities = naive_bayes_model.predict_proba(X_validation_scaled)[:, 1]
+naive_bayes_threshold = find_best_threshold(
+    y_threshold, naive_bayes_threshold_probabilities
+)
+
+print("\n================ TUNING DECISION TREE ================")
+decision_tree_model, tuned_parameters["Decision Tree"] = tune_model(
+    "Decision Tree",
+    DecisionTreeClassifier(random_state=RANDOM_STATE, class_weight="balanced"),
+    {"max_depth": [4, 6, 10, None], "min_samples_leaf": [20, 100]},
+)
+decision_tree_model.fit(X_train_scaled[model_fit_positions], y_model_fit)
+tree_threshold_probabilities = decision_tree_model.predict_proba(
+    X_train_scaled[threshold_positions]
+)[:, 1]
+tree_probabilities = decision_tree_model.predict_proba(X_validation_scaled)[:, 1]
+tree_threshold = find_best_threshold(y_threshold, tree_threshold_probabilities)
+
+print("\n================ TUNING ADABOOST ================")
+balanced_tuning_weights = compute_sample_weight("balanced", y_tuning)
+ada_boost_model, tuned_parameters["AdaBoost"] = tune_model(
+    "AdaBoost",
+    AdaBoostClassifier(random_state=RANDOM_STATE),
+    [
+        {"n_estimators": [50], "learning_rate": [0.1, 0.5]},
+        {"n_estimators": [100], "learning_rate": [0.1, 0.5]},
+        {"n_estimators": [200], "learning_rate": [0.1, 0.5]},
+    ],
+    sample_weights=balanced_tuning_weights,
+)
+ada_boost_model.fit(
+    X_train_scaled[model_fit_positions], y_model_fit,
+    sample_weight=compute_sample_weight("balanced", y_model_fit),
+)
+ada_boost_threshold_probabilities = ada_boost_model.predict_proba(
+    X_train_scaled[threshold_positions]
+)[:, 1]
+ada_boost_probabilities = ada_boost_model.predict_proba(X_validation_scaled)[:, 1]
+ada_boost_threshold = find_best_threshold(
+    y_threshold, ada_boost_threshold_probabilities
+)
+
+print("\n================ TUNING GRADIENT BOOSTING ================")
+gradient_boosting_model, tuned_parameters["Gradient Boosting"] = tune_model(
+    "Gradient Boosting",
+    GradientBoostingClassifier(random_state=RANDOM_STATE),
+    [
+        {"n_estimators": [75], "learning_rate": [0.03, 0.08], "max_depth": [1, 2]},
+        {"n_estimators": [150], "learning_rate": [0.03, 0.08], "max_depth": [1, 2]},
+    ],
+    sample_weights=balanced_tuning_weights,
+)
+gradient_boosting_model.fit(
+    X_train_scaled[model_fit_positions], y_model_fit,
+    sample_weight=compute_sample_weight("balanced", y_model_fit),
+)
+gradient_threshold_probabilities = gradient_boosting_model.predict_proba(
+    X_train_scaled[threshold_positions]
+)[:, 1]
+gradient_boosting_probabilities = gradient_boosting_model.predict_proba(
+    X_validation_scaled
+)[:, 1]
+gradient_boosting_threshold = find_best_threshold(
+    y_threshold, gradient_threshold_probabilities
+)
+
+print("\n================ TUNING XGBOOST ================")
+positive_count = (y_model_fit == 1).sum()
+negative_count = (y_model_fit == 0).sum()
+xgboost_model, tuned_parameters["XGBoost"] = tune_model(
+    "XGBoost",
+    XGBClassifier(
+        eval_metric="logloss",
+        tree_method="hist",
+        n_jobs=4,
+        random_state=RANDOM_STATE,
+    ),
+    [
+        {"n_estimators": [80, 140], "max_depth": [3], "learning_rate": [0.05],
+         "subsample": [0.8], "colsample_bytree": [0.8],
+         "scale_pos_weight": [negative_count / positive_count]},
+        {"n_estimators": [80, 140], "max_depth": [5], "learning_rate": [0.1],
+         "subsample": [0.8], "colsample_bytree": [0.8],
+         "scale_pos_weight": [negative_count / positive_count]},
+    ],
+)
+xgboost_model.fit(X_train_scaled[model_fit_positions], y_model_fit)
+xgboost_threshold_probabilities = xgboost_model.predict_proba(
+    X_train_scaled[threshold_positions]
+)[:, 1]
+xgboost_probabilities = xgboost_model.predict_proba(X_validation_scaled)[:, 1]
+xgboost_threshold = find_best_threshold(y_threshold, xgboost_threshold_probabilities)
+
+trained_models = {
+    "Logistic Regression": logistic_model,
+    "K-Nearest Neighbors": knn_model,
+    "Naive Bayes": naive_bayes_model,
+    "Decision Tree": decision_tree_model,
+    "AdaBoost": ada_boost_model,
+    "Gradient Boosting": gradient_boosting_model,
+    "XGBoost": xgboost_model,
+}
+model_probabilities = {
+    "Logistic Regression": logistic_probabilities,
+    "K-Nearest Neighbors": knn_probabilities,
+    "Naive Bayes": naive_bayes_probabilities,
+    "Decision Tree": tree_probabilities,
+    "AdaBoost": ada_boost_probabilities,
+    "Gradient Boosting": gradient_boosting_probabilities,
+    "XGBoost": xgboost_probabilities,
+}
+model_thresholds = {
+    "Logistic Regression": logistic_threshold,
+    "K-Nearest Neighbors": knn_threshold,
+    "Naive Bayes": naive_bayes_threshold,
+    "Decision Tree": tree_threshold,
+    "AdaBoost": ada_boost_threshold,
+    "Gradient Boosting": gradient_boosting_threshold,
+    "XGBoost": xgboost_threshold,
 }
 
-for name, clf in models_to_check.items():
-    try:
-        clf.predict(X_train_scaled[:1])
-        print(name, "-> Fitted and ready")
-    except Exception as e:
-        print(name, "-> Not ready:", str(e))
+model_results = []
+model_predictions = {}
 
-print("Preprocessor available:", "preprocessor" in globals())
-print("Raw training data available:", "X_train" in globals())
-print("Processed training data available:", "X_train_processed" in globals())
+for model_name, probabilities in model_probabilities.items():
+    threshold_value = model_thresholds[model_name]
+    predictions = (probabilities >= threshold_value).astype(int)
+    model_predictions[model_name] = predictions
+    model_results.append({
+        "Model": model_name,
+        "Threshold": threshold_value,
+        "Accuracy": accuracy_score(y_validation, predictions),
+        "Precision": precision_score(y_validation, predictions, zero_division=0),
+        "Recall": recall_score(y_validation, predictions, zero_division=0),
+        "F1 Score": f1_score(y_validation, predictions, zero_division=0),
+        "ROC AUC": roc_auc_score(y_validation, probabilities),
+    })
 
-#=======================
-#       Check Preprocessing Variables
-#=======================
+    print("\n", model_name)
+    print("Threshold:", round(threshold_value, 2))
+    print(classification_report(y_validation, predictions, zero_division=0))
+    print("Confusion matrix:")
+    print(confusion_matrix(y_validation, predictions))
 
-for name in globals():
-    if any(word in name.lower() for word in [
-        "preprocess", "transform", "scaled", "encoded", "imputer"
-    ]):
-        print(name)
-        
-#===============================================================================================
 
-import joblib
+#================ OBJECTIVE 7: COMPARE MODEL RESULTS ================
+comparison = pd.DataFrame(model_results).sort_values(
+    "F1 Score", ascending=False
+).reset_index(drop=True)
+print("\n================ MODEL COMPARISON ================")
+print(comparison.round(4).to_string(index=False))
+print("\n================ CROSS-VALIDATION TUNING SUMMARY ================")
+tuning_summary = pd.DataFrame([
+    {
+        "Model": model_name,
+        "CV Average Precision": tuning_scores[model_name],
+        "Best Parameters": str(tuned_parameters[model_name]),
+    }
+    for model_name in trained_models
+]).sort_values("CV Average Precision", ascending=False)
+print(tuning_summary.round(4).to_string(index=False))
 
-#=======================
-#       Save Model Artifacts
-#=======================
+plt.figure(figsize=(10, 5))
 
-# Create folder for saved model files
-os.makedirs("models", exist_ok=True)
 
-# Save model, encoder, scaler, feature columns, and threshold
+comparison_plot = comparison.melt(
+    id_vars="Model",
+    value_vars=["Accuracy", "Precision", "Recall", "F1 Score", "ROC AUC"],
+    var_name="Metric",
+    value_name="Score",
+)
+sns.barplot(data=comparison_plot, x="Metric", y="Score", hue="Model")
+plt.title("Model Performance Comparison")
+plt.ylim(0, 1)
+save_graph("04_model_metrics_comparison.png")
+
+plt.figure(figsize=(8, 6))
+for model_name, probabilities in model_probabilities.items():
+    false_positive_rate, true_positive_rate, _ = roc_curve(
+        y_validation, probabilities
+    )
+    auc_value = roc_auc_score(y_validation, probabilities)
+    plt.plot(false_positive_rate, true_positive_rate,
+             label=f"{model_name} (AUC={auc_value:.3f})")
+
+plt.plot([0, 1], [0, 1], "k--", label="Random guess")
+plt.title("ROC Curve Comparison")
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.legend()
+save_graph("05_roc_curve_comparison.png")
+
+fig, axes = plt.subplots(3, 3, figsize=(15, 13))
+for axis, (model_name, predictions) in zip(axes.flatten(), model_predictions.items()):
+    matrix = confusion_matrix(y_validation, predictions)
+    sns.heatmap(matrix, annot=True, fmt="d", cmap="Blues", cbar=False, ax=axis)
+    axis.set_title(model_name)
+    axis.set_xlabel("Predicted label")
+    axis.set_ylabel("Actual label")
+for axis in axes.flatten()[len(model_predictions):]:
+    axis.set_visible(False)
+save_graph("06_confusion_matrices.png")
+
+FIGURES_PATH.mkdir(parents=True, exist_ok=True)
+tuning_summary.to_csv(FIGURES_PATH.parent / "model_tuning_summary.csv", index=False)
+
+
+#================ OBJECTIVE 8: SAVE MODEL FOR THE APP ================
+# Save the best model by validation F1 score for the prediction app.
+best_model_result = comparison.iloc[0]
+best_model_name = best_model_result["Model"]
+best_model = trained_models[best_model_name]
+best_model_threshold = model_thresholds[best_model_name]
+
+# Refit the selected model on all labelled training customers before saving.
+if best_model_name in ["AdaBoost", "Gradient Boosting"]:
+    best_model.fit(
+        X_train_scaled,
+        y_train,
+        sample_weight=compute_sample_weight("balanced", y_train),
+    )
+elif best_model_name == "XGBoost":
+    best_model.set_params(
+        scale_pos_weight=(y_train == 0).sum() / (y_train == 1).sum()
+    )
+    best_model.fit(X_train_scaled, y_train)
+else:
+    best_model.fit(X_train_scaled, y_train)
+
+MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
 joblib.dump(
     {
-        "model": dt_model,
-        "encoder": ohe,
+        "model": best_model,
+        "encoder": encoder,
         "scaler": scaler,
-        "numeric_columns": num_cols,
-        "categorical_columns": cat_cols,
-        "feature_columns": X_train.columns.tolist(),
-        "threshold": opt_th_dt
+        "numeric_columns": numeric_columns,
+        "categorical_columns": categorical_columns,
+        "selected_input_columns": selected_input_columns,
+        "feature_columns": feature_columns,
+        "threshold": best_model_threshold,
+        "model_name": best_model_name,
+        "best_parameters": tuned_parameters[best_model_name],
+        "all_tuned_parameters": tuned_parameters,
+        "tuning_cv_average_precision": tuning_scores,
     },
-    "models/retention_model.pkl"
+    MODEL_PATH,
 )
 
-print("\nModel artifacts saved successfully!")
-print("File: models/retention_model.pkl")
-print("Decision Tree threshold:", opt_th_dt)
-
-#=======================
-#       Verify Saved Model
-#=======================
-
-saved_artifacts = joblib.load("models/retention_model.pkl")
-
-print("\nSaved Model Verification:")
-print("Model:", type(saved_artifacts["model"]).__name__)
-print("Encoder:", type(saved_artifacts["encoder"]).__name__)
-print("Scaler:", type(saved_artifacts["scaler"]).__name__)
-print("Feature count:", len(saved_artifacts["feature_columns"]))
-print("Threshold:", saved_artifacts["threshold"])
-
-#=======================
-#       Test Model Prediction
-#=======================
-
-# Select one validation customer
-sample_raw = X_val_raw.iloc[[0]].copy()
-
-# Apply the saved encoder
-sample_cat = saved_artifacts["encoder"].transform(
-    sample_raw[saved_artifacts["categorical_columns"]]
-)
-
-sample_cat_df = pd.DataFrame(
-    sample_cat,
-    columns=saved_artifacts["encoder"].get_feature_names_out(
-        saved_artifacts["categorical_columns"]
-    ),
-    index=sample_raw.index
-)
-
-# Rebuild features in the original training order
-sample_numeric = sample_raw[saved_artifacts["numeric_columns"]]
-
-sample_features = pd.concat([sample_numeric, sample_cat_df], axis=1)
-sample_features = sample_features[saved_artifacts["feature_columns"]]
-
-# Apply saved scaler
-sample_scaled = saved_artifacts["scaler"].transform(sample_features)
-
-# Predict probability and class
-probability = saved_artifacts["model"].predict_proba(sample_scaled)[0, 1]
-prediction = int(probability >= saved_artifacts["threshold"])
-
-print("\nTest Prediction:")
-print("Predicted probability of class 1:", round(probability, 4))
-print("Predicted class:", prediction)
-print("Actual class:", int(y_val.iloc[0]))
-
-#=======================
-#       Export Test Input
-#=======================
-
-sample_input = X_val_raw.iloc[0][num_cols + cat_cols]
-
-print("\nSample API Input:")
-print(sample_input.to_json())
+print("\nModel saved successfully:", MODEL_PATH)
+print("Saved model:", best_model_name)
+print("Saved threshold:", round(best_model_threshold, 3))
