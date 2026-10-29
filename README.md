@@ -1,146 +1,106 @@
-# 🛒 E-Commerce Customer Retention & Churn Intelligence
+# E-commerce Customer Retention
 
-Predicting customer churn before it happens is one of the highest-ROI challenges in modern e-commerce. Acquiring a new shopper costs roughly 5x more than keeping an existing one—yet most stores only realize a customer is gone when they stop coming back.
+This project combines customer, browsing-session, transaction, marketing, and regional data to estimate whether a customer may churn. The label is `target`: `1` means churn and `0` means retained.
 
-This project builds an end-to-end, **leakage-free machine learning pipeline** that blends behavioral clickstream data, transaction histories, marketing exposure, and geo-demographics across **200,000 customers** to identify who is likely to churn and when to step in.
+The current data contains 160,000 labeled customers. Churn is the minority class (about 20.3%), so accuracy by itself does not describe how useful a model is.
 
----
+## Data files
 
-## 🎯 The Core Business Problem
+Place these files in `data/raw/` before running the training pipeline:
 
-- **Objective**: Predict whether an e-commerce customer will churn (`target = 1`) or remain active/retained (`target = 0`).
-- **Class Imbalance**: ~79.7% of customers are retained; ~20.3% churn. A naive model predicting "everyone stays" would score 80% accuracy while failing 100% of the business goal.
-- **Goal**: Maximize **Recall** (catching churners early) and **ROC-AUC** while maintaining a viable **Precision** so retention campaigns aren't wasted.
+- `customers.csv`
+- `sessions.csv`
+- `transactions.csv`
+- `marketing_campaigns.csv`
+- `geo_data.csv`
+- `train.csv`
+- `test.csv`
+- `sample_submission.csv`
 
----
+The local `sessions.csv` currently has 1,048,575 rows. Earlier project notes expected 2,000,000 rows, so the results may change if the complete source is restored.
 
-## 🏗️ Architecture & Data Ecosystem
+## What the pipeline does
 
-The intelligence engine merges five distinct operational sources into a unified feature store:
+Run `main.py` to inspect and clean each source, build customer-level activity and purchase features, select eight model inputs, tune and compare classifiers, create charts, and save the selected model.
 
-```
- customers.csv (200k)  ──┐
- sessions.csv (1.05M)* ──┼──> Data Cleaning ──> Feature Engineering ──> Leakage-Free ──> Models & Threshold
- transactions.csv (500k)─┼     & Parsing        & Ratios (Master DF)      Partitioning      Optimization
- marketing_campaigns.csv ─┤
- geo_data.csv            ─┘
-```
+Missing numerical values are filled using training data. Categories are one-hot encoded, and numerical model inputs are scaled. Feature selection and preprocessing are fitted without using the final validation labels.
 
-1. **Customers Profile** (Demographics, loyalty score, credit limit, tenure).
-2. **Web Sessions (1,048,575 rows currently available)** (Bounce rates, dwell times, pages viewed, cart additions). The pipeline documentation previously expected 2,000,000 rows; the local CSV has exactly 1,048,575 data rows, so the full source file is needed to restore the missing records.
-3. **Transaction Logs (500,000 rows)** (Order values, items per basket, discount usage, purchase recency).
-4. **Marketing Signals** (Campaign channel affinities and allocated ad budgets).
-5. **Geo-economic Context** (Regional average income, urban density, and internet penetration).
+The eight inputs used by the current model are:
 
----
+1. `loyalty_score`
+2. `age`
+3. `discount_usage_rate`
+4. `email_open_rate`
+5. `avg_cart_additions`
+6. `avg_review_score`
+7. `spend_to_credit_ratio`
+8. `region`
 
-## ⚙️ Key Feature Engineering
+`region` is one-hot encoded, so the model's encoded matrix contains more columns than the eight values entered in the app.
 
-Rather than feeding raw aggregates straight into algorithms, we engineered cross-domain behavioral signals:
+## Model tuning and results
 
-- **Cart-to-Order Conversion**: $\frac{\text{Total Transactions}}{\text{Total Cart Additions} + 1}$ — reveals purchase hesitation.
-- **Monetary Spend Velocity**: $\frac{\text{Total Spend}}{\text{Total Sessions} + 1}$ — distinguishes window-shoppers from high-intent buyers.
-- **Spend-to-Credit Ratio**: $\frac{\text{Total Spend}}{\text{Credit Limit} + 1}$ — measures financial engagement depth.
-- **Recent Activity Windows**: Session and purchase counts over the last 30, 90, and 180 days, plus recent 90-day spend share.
-- **Non-Negative Recency & Tenure**: Measured against dynamic historical observation cutoffs to prevent lookahead distortion.
+Each of the seven classifiers is tuned with three-fold stratified `GridSearchCV`. Search uses average precision on a 20,000-row sample from the training partition. A separate calibration split selects each model's decision threshold. Search settings and scores are written to `reports/model_tuning_summary.csv`; the saved artifact includes its selected settings.
 
----
+The latest comparison on the 32,000-customer validation split is:
 
-## 🛡️ Addressing Data Leakage (Engineering Integrity)
-
-Data leakage is the easiest way to fool yourself with fake high scores in offline ML. We audited and eliminated three major risks:
-
-1. **No Temporal Inversion**: Dates are parsed and recency/tenure are measured against the latest event date in the available data (`2024-09-26`).
-2. **Customer-Level Holdout**: The labelled customers are split into 128,000 training customers and 32,000 final validation customers. A separate 20% calibration split within training selects probability thresholds; the final validation labels are not used for threshold tuning.
-3. **Training-Only Preprocessing and Feature Assessment**: Imputation, outlier caps, category encoding, scaling, and three-fold feature-importance assessment use training data only. The final validation customers are used once for model evaluation.
-
----
-
-## 📊 Model Benchmark & Comparison
-
-The pipeline ranks candidate inputs using three-fold feature-importance stability on the training split, then trains all models with the same **eight raw input features**. Numeric inputs are scaled and `region` is one-hot encoded, so the model matrix contains more than eight columns. Each of the seven classifiers receives a small `GridSearchCV` search scored by average precision, using three-fold stratified CV on a 20,000-row sample from the model-fit training partition. The search settings are saved in `reports/model_tuning_summary.csv` and the selected settings in `models/retention_model.pkl`. Thresholds are calibrated on a separate training subset; the 32,000-customer validation holdout is reserved for final comparison.
-
-The current selected inputs are `loyalty_score`, `age`, `discount_usage_rate`, `email_open_rate`, `avg_cart_additions`, `avg_review_score`, `spend_to_credit_ratio`, and `region`.
-
-| Model | Threshold | Accuracy | Precision | Recall | F1-Score | ROC-AUC |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **XGBoost (saved model)** | **0.48** | 51.70% | 24.86% | 68.20% | **0.3644** | **0.6154** |
-| Gradient Boosting | 0.46 | 48.01% | 24.24% | 73.40% | **0.3644** | 0.6124 |
-| AdaBoost | 0.40 | 44.99% | 23.69% | **76.93%** | 0.3622 | 0.6105 |
+| Model | Threshold | Accuracy | Precision | Recall | F1 | ROC-AUC |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| XGBoost (saved) | 0.48 | 51.70% | 24.86% | 68.20% | 0.3644 | 0.6154 |
+| Gradient Boosting | 0.46 | 48.01% | 24.24% | 73.40% | 0.3644 | 0.6124 |
+| AdaBoost | 0.40 | 44.99% | 23.69% | 76.93% | 0.3622 | 0.6105 |
 | Logistic Regression | 0.47 | 50.18% | 24.27% | 68.57% | 0.3585 | 0.5994 |
 | Decision Tree | 0.45 | 50.51% | 24.30% | 67.95% | 0.3580 | 0.6014 |
-| K-Nearest Neighbors | 0.20 | **56.60%** | 22.60% | 46.90% | 0.3050 | 0.5411 |
+| K-Nearest Neighbors | 0.20 | 56.60% | 22.60% | 46.90% | 0.3050 | 0.5411 |
 | Naive Bayes | 0.20 | 49.64% | 20.39% | 50.95% | 0.2912 | 0.5074 |
 
-The tuned XGBoost result is close to the earlier untuned AdaBoost F1 (0.3665), but does not improve on it. Model ranking quality and recall remain modest; tuning should be treated as a measured search, not a guaranteed performance gain.
+These results are modest: the saved model catches some churners, but its precision is low, so many customers flagged as churn risks may not churn. Tuning did not improve on the earlier best F1 of 0.3665.
 
-### Threshold and class balance
-Churn represents about 20.3% of labelled customers. Accuracy alone is therefore not a useful selection metric. Thresholds are calibrated separately from the final holdout; use precision and recall together to choose an operational point that fits campaign capacity and cost.
+The validation split is used to compare models and select the saved model. Because of that selection, these numbers are useful for comparison but are not an independent final test of the chosen model. A later time-based holdout would give a stronger estimate of future performance.
 
----
+## Run the project
 
-## 📂 Project Structure
+Install the required packages into the project virtual environment. Scikit-learn and XGBoost are pinned to the versions used by the saved model.
 
-```text
-ecommerce-retention-intelligence/
-├── data/
-│   └── raw/                       # Raw CSVs (customers, sessions, transactions, etc.)
-├── main.py                        # Complete pipeline: EDA, feature engineering, models, plots
-├── inspect_data.py                # Initial exploratory data profiling & diagnostics
-├── README.md                      # Project documentation and performance review
-└── .gitignore                     # Data and cache exclusion rules
-```
-
----
-
-## 🚀 Quick Start
-
-### 1. Clone & Set Up Environment
-```bash
-git clone https://github.com/shivam-kr11/ecommerce-customer-retention-prediction.git
-cd ecommerce-retention-intelligence
-
-# Create virtual environment
-python -m venv .venv
-source .venv/bin/activate        # On Windows: .venv\Scripts\activate
-
-# Install dependencies into the active virtual environment
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
 ```
 
-On Windows PowerShell, you can run the install and app commands explicitly through the project environment:
+Run the training pipeline when the raw data is available:
 
 ```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-.\.venv\Scripts\python.exe -m uvicorn app:app --reload
-```
-
-### 2. Add Raw Data
-Ensure your raw CSV files are placed in `data/raw/`:
-- `customers.csv`, `sessions.csv`, `transactions.csv`, `marketing_campaigns.csv`, `geo_data.csv`, `train.csv`, `test.csv`
-
-### 3. Run the Pipeline
-```bash
 python main.py
 ```
-This executes the data cleaning, feature creation, leak-free validation split, model training, threshold evaluation, and generates comparison visual charts.
 
----
+Start the API in one terminal:
 
-## 🖥️ Interactive Streamlit App
+```powershell
+python -m uvicorn app:app --reload
+```
 
-Run the API with `python -m uvicorn app:app --reload`, then launch the interface in a second terminal with `streamlit run streamlit_app.py`. On Windows, use the `.venv\Scripts\python.exe` and `.venv\Scripts\streamlit.exe` commands so both processes use the installed project dependencies. The app includes one prediction page, a dashboard, model insights, and session prediction history.
+Start the Streamlit app in a second terminal:
 
-### Customer prediction page
+```powershell
+streamlit run streamlit_app.py
+```
 
-The **Prediction** page collects the active model's selected features plus customer name and phone. A random customer ID is generated; name and phone are stored with the input values, predicted class, probability, threshold, model name, and timestamp in `data/submissions/prediction_inputs.json`. Only the model features are sent to the API. The **Prediction History** sidebar page reads saved records, supports class, ID, and name filtering, exports filtered results as CSV or JSON, and can remove selected records after confirmation. The JSON file can contain customer contact details; it is ignored by Git, and authentication is not implemented yet, so keep this demo local.
+## Streamlit pages and prediction history
 
-## 🔮 What’s Next on the Roadmap
+- **Dashboard** shows saved prediction totals and recent results.
+- **Prediction** asks for the customer name and phone, then the eight model inputs. It generates a random customer ID. Name and phone are stored with the prediction but are not sent to the model.
+- **Prediction History** lets you filter and search saved records, export them as CSV or JSON, and remove selected records after a confirmation step.
+- **Model Insights** shows the loaded model, threshold, and active inputs.
 
-- [x] **Boosting benchmarks**: AdaBoost, Gradient Boosting, and XGBoost are included in the current comparison.
-- [ ] **Further boosting experiments**: Benchmark LightGBM and CatBoost with validation-safe class-imbalance tuning.
-- [ ] **Restore Complete Session Data**: Replace the local 1,048,575-row sessions file with the expected 2,000,000-row source before retraining.
-- [ ] **Time-Based Holdout**: Validate on a later observation window to measure performance on future customer behavior.
-- [ ] **Target Encoding**: Replacing sparse one-hot geographic vectors with compact target-encoded regional churn rates.
-- [x] **Hyperparameter tuning**: Three-fold stratified `GridSearchCV` across all seven classifiers; see `reports/model_tuning_summary.csv` for selected parameters and CV scores.
-- [ ] **Further tuning**: Expand the search ranges and evaluate LightGBM/CatBoost with a nested or later time-based holdout.
+Predictions are stored in `data/submissions/prediction_inputs.json`. The `data/` directory is ignored by Git because it contains source data and may contain customer phone numbers. Authentication is not implemented, so keep this app on a trusted local machine.
+
+## Project files
+
+- `main.py` — cleaning, feature engineering, tuning, evaluation, charts, and model saving
+- `app.py` — FastAPI prediction service
+- `streamlit_app.py` — dashboard, prediction form, and saved-history pages
+- `models/retention_model.pkl` — saved model and preprocessing objects
+- `reports/figures/` — charts generated by the pipeline
+- `reports/model_tuning_summary.csv` — selected tuning settings and cross-validation scores
+- `requirements.txt` — project dependencies
